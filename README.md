@@ -168,6 +168,16 @@ store through read-only `VACUUM INTO` snapshots, so they cannot corrupt
 live data. They are **operator-only and never run in CI** — they self-skip
 unless you set their opt-in env vars (each file's header lists its own).
 
+## Credits
+
+The algorithmic summarization pipeline in [`vcc/`](vcc/) is ported from
+[pi-vcc](https://github.com/buihongduc132/pi-vcc) v0.4.x
+([buihongduc132](https://github.com/buihongduc132), MIT) — a fork of
+[sting8k/pi-vcc](https://github.com/sting8k/pi-vcc) (MIT) — adapted for
+per-session use with `@earendil-works/pi-ai` (type swap, per-turn merge
+semantics, full-session entry points dropped). Both upstream projects are
+MIT-licensed; the ported files carry "Ported from pi-vcc" header notes.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

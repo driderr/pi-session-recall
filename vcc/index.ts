@@ -1,6 +1,8 @@
 /**
  * VCC (Versioned Context Compression) — public API.
- * Ported from pi-vcc, adapted for session-recall per-turn use.
+ * Ported from pi-vcc v0.4.x (buihongduc132/pi-vcc, MIT — a fork of
+ * sting8k/pi-vcc, MIT), adapted for session-recall per-turn use.
+ * Full provenance: README "Credits" section.
  */
 
 export { normalize } from "./normalize.js";
