@@ -1,6 +1,12 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { join, dirname, basename } from "node:path";
+import { join, dirname } from "node:path";
+
+/** Separator-agnostic basename. Session paths come from pi's index and carry
+ *  the separators of the host that RECORDED them (backslashes on Windows);
+ *  node:path's platform basename would not split them when the extension runs
+ *  on another OS. Same derivation as the short-term injection in index.ts. */
+export const pathBasename = (p: string): string => p.split(/[\\/]/).pop() || p;
 import { homedir } from "node:os";
 import { complete, type Message, type Model } from "@earendil-works/pi-ai";
 import { log } from "./logger.js";
@@ -217,13 +223,13 @@ export interface MergeChunk {
 
 const SEPARATOR = "\n---\n"; // same string as the prompt join below — packer measurement matches the prompt
 
-/** Renders one session entry. `<basename>` = final path segment (node:path basename — same
+/** Renders one session entry. `<basename>` = final path segment (pathBasename — same
  *  derivation as the short-term injection). VCC content is byte-identical;
  *  only the header prefix is added. NOTE: blank line after header (\n\n) — differs
  *  deliberately from the short-term entry format (which uses a single \n);
  *  the spec pins the merge format. */
 export function renderSessionEntry(sessionPath: string, unmergedFreshContent: string): string {
-  return `### Session: ${basename(sessionPath)}\n\n${unmergedFreshContent}`;
+  return `### Session: ${pathBasename(sessionPath)}\n\n${unmergedFreshContent}`;
 }
 
 /** Greedy packing, input order preserved (caller supplies updated_at ASC rows).
@@ -290,7 +296,7 @@ export function readMergeQuarantine(db: BetterSqliteDb, headPath: string): Merge
   try {
     return JSON.parse(row.value) as MergeQuarantineRecord;
   } catch (err) {
-    log(`WARN: corrupt merge quarantine sentinel for ${basename(headPath)}: ${err} (row kept)`);
+    log(`WARN: corrupt merge quarantine sentinel for ${pathBasename(headPath)}: ${err} (row kept)`);
     return null;
   }
 }
@@ -455,7 +461,7 @@ export async function runMergeFold(
   const outcome = await withLlmBusy(async () => {                      // whole-run LLM-busy hold (acquire once)
     for (let i = 0; i < toProcess.length; i++) {
       const chunk = toProcess[i];
-      const firstSession = basename(chunk.paths[0]);
+      const firstSession = pathBasename(chunk.paths[0]);
       // Pin H: add the chunk's session hashes BEFORE the call so the prompt's
       // Last-Seen/stale-prune numbers use mergedSessions.size after this chunk's add.
       for (const p of chunk.paths) mergedSessions.add(sessionPathHash(p));
@@ -1256,7 +1262,7 @@ export function extractKeySignals(content: string): string[] {
 /** Base Source token (pin A): timestamp basename form, else 8-char MD5 prefix.
  *  Collision resolution (two paths, same token) happens inside extractSignalTable. */
 export function sessionSourceToken(sessionPath: string): string {
-  const b = basename(sessionPath);
+  const b = pathBasename(sessionPath);
   const m = b.match(TIMESTAMP_BASENAME_RE);
   if (m) return `${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]}`;
   return sessionPathHash(sessionPath).slice(0, 8);
@@ -2185,7 +2191,7 @@ export async function mergeSessionSummary(
   // Guard 1: globalThis flag prevents concurrent merges on same session
   const mergeMap = G.__sessionRecallVccMerge__ || {};
   if (mergeMap[sessionPath]) {
-    log(`mergeSessionSummary: already merging ${basename(sessionPath)}, skipping`);
+    log(`mergeSessionSummary: already merging ${pathBasename(sessionPath)}, skipping`);
     return;
   }
   mergeMap[sessionPath] = true;
@@ -2207,7 +2213,7 @@ export async function mergeSessionSummary(
     } | undefined;
 
     if (row && row.last_fresh_hash === freshHash) {
-      log(`mergeSessionSummary: duplicate fresh hash for ${basename(sessionPath)}, skipping`);
+      log(`mergeSessionSummary: duplicate fresh hash for ${pathBasename(sessionPath)}, skipping`);
       return;
     }
 
@@ -2231,7 +2237,7 @@ export async function mergeSessionSummary(
     // Append freshSummary to unmerged_fresh_content for delta merging
     sqliteAppendUnmergedFreshContent(db, sessionPath, freshSummary);
   } catch (err) {
-    log(`mergeSessionSummary: error for ${basename(sessionPath)}: ${err}`);
+    log(`mergeSessionSummary: error for ${pathBasename(sessionPath)}: ${err}`);
   } finally {
     // ALWAYS clear the flag — use the captured mergeMap reference, NOT a fresh
     // read of G.__sessionRecallVccMerge__, which could be a different object if

@@ -33,6 +33,46 @@ import { loadConfigOnce, DEFAULT_CONFIG } from "../config.js";
 import { ensureEmbedServer } from "../embeddings.js";
 import { mergeSignalsIntoRowStore, ROWSTORE_LAST_FOLD_MS_KEY, type RowStoreMergeResult } from "../rowstore.js";
 
+// ── Hermetic model config (clean-machine fix, 2026-10-15) ──────────────────
+// The real runMergeFold / runLtTableConversion resolve the merge model via
+// loadModelConfig() → <homedir>/.pi/agent/models.json. Without this shim the
+// suite passed only on machines that happen to carry a real models.json (the
+// author's dev box); on a clean CI runner both LLM stages logged "no model
+// config" and every real-fold test saw zero LLM calls. The stub config makes
+// the pair resolvable on any machine — the actual LLM call is the aliased
+// pi-ai mock, so no network is touched. HOME/USERPROFILE are restored in
+// afterAll (never leaked into other suites).
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as pathJoin } from "node:path";
+import { beforeAll, afterAll } from "vitest";
+
+const REAL_HOME_ENV = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+let stubHome: string;
+beforeAll(() => {
+  stubHome = mkdtempSync(pathJoin(tmpdir(), "sr-modelcfg-"));
+  mkdirSync(pathJoin(stubHome, ".pi", "agent"), { recursive: true });
+  writeFileSync(
+    pathJoin(stubHome, ".pi", "agent", "models.json"),
+    JSON.stringify({
+      providers: {
+        "stub-provider": {
+          api: "openai-completions",
+          baseUrl: "http://127.0.0.1:9/v1",
+          apiKey: "sk-test",
+          models: [{ id: "stub-model", name: "Stub Model" }],
+        },
+      },
+    }),
+  );
+  process.env.HOME = stubHome;
+  process.env.USERPROFILE = stubHome;
+});
+afterAll(() => {
+  process.env.HOME = REAL_HOME_ENV.HOME;
+  process.env.USERPROFILE = REAL_HOME_ENV.USERPROFILE;
+});
+
 // Module mocks for the handler-level describe (design §3 + §4.1). The helper-level
 // describe below uses the REAL helpers (passed through via ...actual spread).
 vi.mock("../config.js", async (importOriginal) => {

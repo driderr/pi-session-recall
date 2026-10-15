@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fileURLToPath } from "node:url";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 import { loadConfigOnce, CACHE_DIR, type SessionRecallConfig } from "./config.js";
 import { discoverSessions, SQLITE_PATH, matchesIgnorePatterns } from "./discoverer.js";
-import { combineContextForInjection, recentCorrectionsSection, getPrimaryModel, readLongTerm, getLlmStats, shouldSkipByTime, openCacheDb, sqliteReadUnmergedSessionSummaries, mergeSessionSummary, sqliteAppendUnmergedFreshContent, sqliteReadUnmergedContentByPaths, packMergeChunks, runMergeFold, runLtTableConversion, pruneMergeQuarantine, sqliteCountUnmergedSessions, effectiveMergeIntervalMs, sqliteGetMeta, sqliteSetMeta, buildMergeModelPair, waitForLlmEndpointReady } from "./summarizer.js";
+import { combineContextForInjection, recentCorrectionsSection, getPrimaryModel, readLongTerm, getLlmStats, shouldSkipByTime, openCacheDb, sqliteReadUnmergedSessionSummaries, mergeSessionSummary, sqliteAppendUnmergedFreshContent, sqliteReadUnmergedContentByPaths, packMergeChunks, runMergeFold, runLtTableConversion, pruneMergeQuarantine, sqliteCountUnmergedSessions, effectiveMergeIntervalMs, sqliteGetMeta, sqliteSetMeta, buildMergeModelPair, waitForLlmEndpointReady, pathBasename } from "./summarizer.js";
 import { ensureEmbedServer } from "./embeddings.js";
 import { mergeSignalsIntoRowStore, getRowsForInjection, getRecentCorrections, ROWSTORE_LAST_FOLD_MS_KEY } from "./rowstore.js";
 import { extractVccSummary } from "./vcc/index.js";
@@ -234,7 +234,7 @@ export async function captureTurnEndCorrection(args: {
   const markerLine = config.correctionMarkerFormat.replace("${timestamp}", ts) + " " + stripped;
   sqliteAppendUnmergedFreshContent(db, sessionFile, markerLine);
   recordEvaluated();
-  log(`correction-capture: session=${basename(sessionFile)} stamped (${fire})`);
+  log(`correction-capture: session=${pathBasename(sessionFile)} stamped (${fire})`);
   return { appended: true };
 }
 
@@ -1043,7 +1043,7 @@ export default function (pi: ExtensionAPI) {
 
           for (const text of summaries) {
             if (text.toLowerCase().includes(query)) {
-              results.push({ session: basename(session.path), cwd: session.cwd, text, type: "summary" });
+              results.push({ session: pathBasename(session.path), cwd: session.cwd, text, type: "summary" });
               if (results.length >= limit) break;
             }
           }
