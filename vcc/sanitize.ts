@@ -1,0 +1,15 @@
+/**
+ * Strip ANSI escape codes and control characters from text.
+ * Ported from pi-vcc.
+ */
+
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f]/g;
+
+export function sanitize(text: string): string {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(ANSI_RE, "")
+    .replace(CTRL_RE, "");
+}

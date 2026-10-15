@@ -1,0 +1,68 @@
+# session-recall configuration
+# Place at: ~/.pi/agent/session-recall.yaml
+# (On first run, this file is copied there automatically if no config exists.)
+#
+# All settings are optional. Omitted values use their defaults.
+# Values outside the valid range are clamped to the nearest boundary.
+
+# Session discovery
+maxSessions: 10                # Recent sessions to scan (1-50)
+sessionScope: all              # "cwd" = current project only, "all" = all projects
+ignorePatterns: []             # Glob patterns to exclude (e.g., subagent artifacts)
+lessonExcludePatterns: []      # Session-path patterns never queued for lesson extraction (writer guard; /recall listing unaffected)
+
+# Context injection
+maxTokens: 500                 # Context brief cap in tokens (100-2000); converted to chars (token * 4)
+injectShortTerm: false          # Include the short-term "Recent Signals (not yet merged)" section in session-start injection (boolean; off by default since 2026-09-02)
+
+# LLM long-term merge
+# Short-term summaries are algorithmic (no LLM). LLM merges multiple summaries into one accumulated brief.
+summarizeTimeoutMs: 600000     # Max time for LLM merge call (60000-600000, i.e. 1-10 min)
+longTermMaxChars: 5000         # Max chars for long-term summary (2000-10000)
+longTermMinIntervalMs: 14400000  # Min ms between merges (300000-604800000, i.e. 5min-7days, default: 4h)
+longTermMinTurns: 10           # Min merge_count sum before merging (1-1000)
+mergeChunkChars: 24000           # Max chars per merge chunk incl. session headers + separators (2000-60000)
+mergeDrainIntervalMs: 1800000    # Min ms between merge runs while unmerged sessions remain (60000-604800000, default: 30min)
+mergeMaxChunksPerRun: 8          # Max chunks processed per session_start run (1-50)
+recencyHalfLifeSessions: 50      # LT injection recency half-life in sessions (1-1000)
+stalePruneAfterSessions: 100     # Merge-prompt stale-prune gap in sessions (10-1000)
+stalePruneMinScore: 3            # Stale rows below this score are pruned by the merge prompt (1-100)
+longTermHardMaxChars: 20000      # Post-merge validation ceiling; >= longTermMaxChars (longTermMaxChars-20000)
+
+# Row-store (rowstore-embeddings C1)
+# useRowStore is the single row-store switch (fold + injection read from
+# long_term_rows) — the live yaml is `true` since the C4 flip (2026-09-01);
+# the example stays false. Rollback = set false + restart (the legacy leg then
+# runs unpaused at the 4h/30min defaults). The `LTROW MODE LEGACY|ROWSTORE` log
+# line is the greppable record of the flag's state.
+useRowStore: false                 # Single row-store switch (boolean; non-boolean values ignored)
+# Embedding retrieval (consumed by later changes; documented defaults here)
+embedRetrievalThreshold: 0.5       # Cosine threshold below which a candidate row is not a match (0-1, no floor)
+embedRetrievalTopK: 5              # Max candidate rows returned per signal retrieval (1-50)
+embedAutoConsolidateThreshold: 0.85 # Similarity at/above which rows are near-duplicates (0-1, no floor)
+rowStoreMaxSignalsPerRun: 20       # Per-run cap on row-store signals processed (1-50)
+lessonExtractMaxPerRun: 4          # Per-run cap on row-store EXTRACT calls / 24K-chunk slots (1-50) — session-start pacing; the /recall-flush command overrides it (its own batch of 5)
+# Local embedding server (auto-spawned at fold time; detached, outlives Pi, never killed by the extension)
+embedServerPort: 5002              # TCP port (1024-65535; floor keeps a misconfig away from the chat instances)
+embedServerReadyTimeoutMs: 120000  # Readiness-poll bound after a spawn (5000-600000; 0 impossible)
+# Auto-spawn paths (the extension never relocates the model — moving it is a config change only).
+# If either path is missing when a spawn is needed, the probe fails closed (exe-missing / model-missing).
+# Tier 2 (row-store) auto-spawn paths. Empty = auto-spawn disabled: the probe
+# fails closed (model-missing / exe-missing) and the legacy leg keeps working.
+# Set both to enable the row store on a fresh install:
+#   embedServerModelPath — nomic-embed-text-v1.5 GGUF (768-dim), download from
+#     huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF (e.g. the Q8_0 file)
+#   embedServerExePath   — any local llama.cpp build (the llama-server executable)
+embedServerModelPath: ''   # e.g. 'C:\models\nomic-embed-text-v1.5.Q8_0.gguf'
+embedServerExePath: ''     # e.g. 'C:\tools\llama-server.exe'
+
+# Correction recency (correction-recency-injection C5 — D-9 / P6)
+correctionDetectionEnabled: true       # Turn-end correction capture kill-switch (boolean; ON by default — D-7)
+correctionWindowDays: 7                # Base recency window in days for RECENT CORRECTIONS (1-365)
+correctionMaxWindowDays: 30            # Widened window when < correctionMinItems rows fall in the base window (7-365)
+correctionMinItems: 3                  # Min rows in the base window before it widens (1-50)
+correctionMaxItems: 5                  # Lesson cap for the RECENT CORRECTIONS section (1-50; no character cap)
+correctionMarkerFormat: '@@CORR ${timestamp}@@'  # Marker sigil — exactly one ${timestamp} placeholder
+
+# VCC brief transcript
+briefTranscriptCap: 120        # Max lines in Brief Transcript section (10-500)

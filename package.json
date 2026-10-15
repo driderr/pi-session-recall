@@ -1,0 +1,25 @@
+{
+  "name": "session-recall",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Pi extension that recovers context from recent sessions automatically",
+  "main": "index.ts",
+  "license": "MIT",
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.78.0",
+    "better-sqlite3": "^11.0.0",
+    "typebox": "^1.1.38",
+    "yaml": "^2.7.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "sync": "node scripts/sync.cjs"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "memfs": "^4.57.6",
+    "typescript": "^6.0.3",
+    "vitest": "^3.0.0"
+  }
+}
