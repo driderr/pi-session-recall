@@ -51,12 +51,15 @@ RECENT CORRECTIONS (last 7d):
 git clone https://github.com/driderr/pi-session-recall
 cd pi-session-recall
 npm install
-npm run sync     # copies the .ts sources to ~/.pi/agent/extensions/session-recall/
+npm run sync     # deploys the sources to ~/.pi/agent/extensions/session-recall/
+                   # and installs the extension's runtime dependencies there
 ```
 
 Then run `/reload` in pi and check with `/recall-health`. The config file
 auto-seeds to `~/.pi/agent/session-recall.yaml` on first run;
 [`config.example.yaml`](config.example.yaml) documents every key.
+
+`npm run sync` is idempotent — after `git pull`, re-run it and `/reload` again.
 
 **No build step, no database install.** pi loads the TypeScript sources
 directly, and the extension reuses *pi's own* session-index SQLite file,
