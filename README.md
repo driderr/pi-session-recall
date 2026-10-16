@@ -61,6 +61,13 @@ auto-seeds to `~/.pi/agent/session-recall.yaml` on first run;
 
 `npm run sync` is idempotent — after `git pull`, re-run it and `/reload` again.
 
+**Where to clone:** anywhere — `npm run sync` always deploys to the fixed
+`~/.pi/agent/extensions/session-recall`, whatever the clone's location. One
+exception: don't put the clone *inside* `~/.pi/agent/extensions/` — pi loads
+every subdirectory with an `index.ts` there, so a clone in that folder would
+run as a second extension instance next to the deployed copy (duplicate
+tools, double merges).
+
 **No build step, no database install.** pi loads the TypeScript sources
 directly, and the extension reuses *pi's own* session-index SQLite file,
 self-creating its tables on first run.
