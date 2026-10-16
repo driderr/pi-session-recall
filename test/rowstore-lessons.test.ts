@@ -424,6 +424,36 @@ describe("EXTRACT parser (all-or-nothing)", () => {
     expect(lines).toContain(`rowstore merge: quarantined ${basename(PA)} (3 consecutive failures)`);
   });
 
+  it("LLM endpoint down → the extract failure SKIPS the quarantine strike (2026-10-16 incident: the 2026-10-13 5001 outage struck 4 unrelated sessions in one second and parked 3 of them for 7 days)", async () => {
+    const C = contentOfChars(300, "aaa");
+    seedUnmerged(PA, C);
+    const llm = scriptLlmCall(null); // no text → immediate extract timeout, one per run
+    await runMerge(configFor(), makeEmbed().fn, llm.fn, { probeLlmDown: async () => true });
+    await runMerge(configFor(), makeEmbed().fn, llm.fn, { probeLlmDown: async () => true });
+    const res = await runMerge(configFor(), makeEmbed().fn, llm.fn, { probeLlmDown: async () => true });
+    expect(res.sessionsFailed).toContain(PA); // still a failure — just not a fault of the record
+    expect(res.sessionsMarkedMerged).toBe(0);
+    expect(res.skipped.find(sk => sk.sessionPath === PA)?.reason).toBe("llm-down");
+    expect(readMergeQuarantine(db, PA)).toBeFalsy(); // NO strike, ever — no sentinel at all
+    expect(unmerged(PA)).not.toBeNull(); // still in the backlog — retried next run, never parked
+    expect(lines).toContain(`LTROW MERGE-SKIP reason=llm-down session=${PA} signal="extract-failed"`);
+    expect(lines).not.toContain("rowstore merge: quarantined");
+  });
+
+  it("embed endpoint down → the per-lesson embed-null SKIPS the quarantine strike (2026-10-15 22:10: the probe said ready, the embed call died — 'fetch failed')", async () => {
+    const C = contentOfChars(300, "bbb");
+    seedUnmerged(PA, C);
+    const llm = scriptLlmCall("- a lesson"); // extract succeeds → the per-lesson pipeline
+    const badEmbed = async () => null; // stage 1 (the query embed) fails
+    const res = await runMerge(configFor(), badEmbed, llm.fn, { probeEmbedDown: async () => true });
+    expect(res.sessionsFailed).toContain(PA);
+    expect(res.skipped.find(sk => sk.sessionPath === PA)?.reason).toBe("embed-down");
+    expect(readMergeQuarantine(db, PA)).toBeFalsy();
+    expect(unmerged(PA)).not.toBeNull();
+    expect(lines).toContain(`LTROW MERGE-SKIP reason=embed-down session=${PA} signal="a lesson"`);
+    expect(lines).not.toContain("rowstore merge: quarantined");
+  });
+
   it("LTROW session identifiers are FULL paths, not basenames (nested subagent files are all named session.jsonl — 2026-09-04 quarantine post-mortem: the basename made the failed session unidentifiable in the logs)", async () => {
     // production shape: sessions/<project-dir>/<ts>_<id>/<child-id>/run-0/session.jsonl
     const PN = "C:\\sessions\\--proj--\\2026-09-01T19-11-01-375Z_01a05e61\\run-0\\session.jsonl";

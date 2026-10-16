@@ -249,6 +249,13 @@ async function probeOnce(port: number): Promise<ProbeOutcome> {
   }
 }
 
+/** Lightweight readiness probe (no spawn, no hint logging) — the fold's infra
+ *  pre-check (mergeSignalsIntoRowStore): is the embed endpoint answering RIGHT
+ *  NOW? "ready" = up; every other outcome (refused/wrong-model/http/net) = down. */
+export async function probeEmbedServerUp(port: number): Promise<boolean> {
+  const probe = await probeOnce(port);
+  return probe.kind === "ready";
+}
 // ─── Lifecycle (design §3.2 + §4 — single emitter of LTROW-SRV) ──────────────
 
 export async function ensureEmbedServer(config: SessionRecallConfig, io: EmbedServerIo = {}): Promise<EmbedServerStatus> {

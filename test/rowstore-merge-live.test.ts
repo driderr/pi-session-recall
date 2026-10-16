@@ -357,7 +357,7 @@ interface ReportCore {
   runs: number; sessionsStarted: number; lessons: number; marked: number; failed: number; quarantined: number; drained: boolean;
   extractCalls: number; chunkedSessions: number;
   decisionHist: { match: number; new: number; contradict: number };
-  skipHist: { "embed-null": number; timeout: number; "parse-fail": number };
+  skipHist: { "embed-null": number; timeout: number; "parse-fail": number; "llm-down": number; "embed-down": number }; // 2026-10-16: infra pre-check reasons (fixed key order — zeros always render)
   lessonsTranscript: string[];
   decisionTranscript: string[];
   candidatesTranscript: string[];
@@ -465,7 +465,7 @@ const buildDryReport = (a: DryAgg): string => {
     `drain runs=${a.runs} sessions=${a.sessionsStarted} lessons=${a.lessons} marked=${a.marked} failed=${a.failed} quarantined=${a.quarantined} incomplete=${a.drained ? "no" : "yes"}`,
     `extract_calls=${a.extractCalls} chunked_sessions=${a.chunkedSessions}`,
     `decision_histogram: match=${a.decisionHist.match} new=${a.decisionHist.new} contradict=${a.decisionHist.contradict}`,
-    `skip_histogram: embed-null=${a.skipHist["embed-null"]} timeout=${a.skipHist.timeout} parse-fail=${a.skipHist["parse-fail"]}`,
+    `skip_histogram: embed-null=${a.skipHist["embed-null"]} timeout=${a.skipHist.timeout} parse-fail=${a.skipHist["parse-fail"]} llm-down=${a.skipHist["llm-down"]} embed-down=${a.skipHist["embed-down"]}`,
     `enrich_histogram: rewrite=${eh.rewrite} none=${eh.none} rejected=${eh.rejected}`,
     `empty_sessions=${a.emptySessions.length}/${a.sessionsStarted}`,
     `rowstore_delta: before=${a.rowstoreBefore} after=${a.rowstoreAfter}`,
@@ -518,7 +518,7 @@ const buildLiveReport = (a: LiveAgg): string => {
     `drain runs=${a.runs} sessions=${a.sessionsStarted} lessons=${a.lessons} marked=${a.marked} failed=${a.failed} quarantined=${a.quarantined} incomplete=${a.drained ? "no" : "yes"}`,
     `extract_calls=${a.extractCalls} chunked_sessions=${a.chunkedSessions}`,
     `decision_histogram: match=${a.decisionHist.match} new=${a.decisionHist.new} contradict=${a.decisionHist.contradict}`,
-    `skip_histogram: embed-null=${a.skipHist["embed-null"]} timeout=${a.skipHist.timeout} parse-fail=${a.skipHist["parse-fail"]}`,
+    `skip_histogram: embed-null=${a.skipHist["embed-null"]} timeout=${a.skipHist.timeout} parse-fail=${a.skipHist["parse-fail"]} llm-down=${a.skipHist["llm-down"]} embed-down=${a.skipHist["embed-down"]}`,
     `enrich_histogram: rewrite=${eh.rewrite} none=${eh.none} rejected=${eh.rejected}`,
     `empty_sessions=${a.emptySessions.length}/${a.sessionsStarted}`,
     `second_run_drained=${a.secondRunDrained}`,
@@ -554,7 +554,7 @@ function emptyDryAgg() {
     runs: 0, sessionsStarted: 0, lessons: 0, marked: 0, failed: 0, quarantined: 0, drained: false,
     extractCalls: 0, chunkedSessions: 0,
     decisionHist: { match: 0, new: 0, contradict: 0 },
-    skipHist: { "embed-null": 0, timeout: 0, "parse-fail": 0 },
+    skipHist: { "embed-null": 0, timeout: 0, "parse-fail": 0, "llm-down": 0, "embed-down": 0 },
     lessonsTranscript: [] as string[],
     decisionTranscript: [] as string[],
     candidatesTranscript: [] as string[],
@@ -588,7 +588,7 @@ function filledDryAgg() {
     runs: 1, sessionsStarted: 2, lessons: 5, marked: 2, failed: 0, quarantined: 0, drained: true,
     extractCalls: 3, chunkedSessions: 1,
     decisionHist: { match: 2, new: 2, contradict: 1 },
-    skipHist: { "embed-null": 0, timeout: 0, "parse-fail": 0 },
+    skipHist: { "embed-null": 0, timeout: 0, "parse-fail": 0, "llm-down": 0, "embed-down": 0 },
     lessonsTranscript: [
       "LTROW LESSONS n=3 session=2026-08-28T09-00-00Z_a1b2c3d4.jsonl",
       "LTROW LESSONS n=2 session=2026-08-29T14-30-00Z_e5f6a7b8.jsonl",
@@ -883,7 +883,7 @@ describe("rowstore-lessons vehicle — pure helpers (unit, non-gated)", () => {
       "drain runs=0 sessions=0 lessons=0 marked=0 failed=0 quarantined=0 incomplete=yes",
       "extract_calls=0 chunked_sessions=0",
       "decision_histogram: match=0 new=0 contradict=0",
-      "skip_histogram: embed-null=0 timeout=0 parse-fail=0",
+      "skip_histogram: embed-null=0 timeout=0 parse-fail=0 llm-down=0 embed-down=0",
       "enrich_histogram: rewrite=0 none=0 rejected=0",
       "empty_sessions=0/0",
       "rowstore_delta: before=0 after=0",
@@ -951,7 +951,7 @@ describe("rowstore-lessons vehicle — pure helpers (unit, non-gated)", () => {
       "drain runs=1 sessions=2 lessons=5 marked=2 failed=0 quarantined=0 incomplete=no",
       "extract_calls=3 chunked_sessions=1",
       "decision_histogram: match=2 new=2 contradict=1",
-      "skip_histogram: embed-null=0 timeout=0 parse-fail=0",
+      "skip_histogram: embed-null=0 timeout=0 parse-fail=0 llm-down=0 embed-down=0",
       "enrich_histogram: rewrite=1 none=4 rejected=0",
       "empty_sessions=0/2",
       "rowstore_delta: before=146 after=147",
@@ -1063,7 +1063,7 @@ describe("rowstore-lessons vehicle — pure helpers (unit, non-gated)", () => {
       "drain runs=1 sessions=2 lessons=5 marked=2 failed=0 quarantined=0 incomplete=no",
       "extract_calls=4 chunked_sessions=1",
       "decision_histogram: match=2 new=2 contradict=1",
-      "skip_histogram: embed-null=0 timeout=0 parse-fail=0",
+      "skip_histogram: embed-null=0 timeout=0 parse-fail=0 llm-down=0 embed-down=0",
       "enrich_histogram: rewrite=1 none=4 rejected=0",
       "empty_sessions=0/2",
       "second_run_drained=0",
@@ -1239,7 +1239,7 @@ describe.runIf(process.env.ROWSTORE_MERGE_LIVE === "1")("rowstore-merge-live —
       let marked = 0;
       let failed = 0;
       const decisionHist: Record<"match" | "new" | "contradict", number> = { match: 0, new: 0, contradict: 0 };
-      const skipHist: Record<"embed-null" | "timeout" | "parse-fail", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0 };
+      const skipHist: Record<"embed-null" | "timeout" | "parse-fail" | "llm-down" | "embed-down", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0, "llm-down": 0, "embed-down": 0 };
       const decisionTranscript: string[] = [];
       const candidatesTranscript: string[] = [];
       const enrichTranscript: string[] = [];
@@ -1475,7 +1475,7 @@ describe.runIf(process.env.ROWSTORE_LESSONS_DRY === "1")("rowstore-lessons vehic
       let marked = 0;
       let failed = 0;
       const decisionHist: Record<"match" | "new" | "contradict", number> = { match: 0, new: 0, contradict: 0 };
-      const skipHist: Record<"embed-null" | "timeout" | "parse-fail", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0 };
+      const skipHist: Record<"embed-null" | "timeout" | "parse-fail" | "llm-down" | "embed-down", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0, "llm-down": 0, "embed-down": 0 };
       const lessonsTranscript: string[] = [];
       const decisionTranscript: string[] = [];
       const candidatesTranscript: string[] = [];
@@ -1779,7 +1779,7 @@ describe.runIf(process.env.ROWSTORE_LESSONS_LIVE === "1")("rowstore-lessons vehi
       let marked = 0;
       let failed = 0;
       const decisionHist: Record<"match" | "new" | "contradict", number> = { match: 0, new: 0, contradict: 0 };
-      const skipHist: Record<"embed-null" | "timeout" | "parse-fail", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0 };
+      const skipHist: Record<"embed-null" | "timeout" | "parse-fail" | "llm-down" | "embed-down", number> = { "embed-null": 0, timeout: 0, "parse-fail": 0, "llm-down": 0, "embed-down": 0 };
       const lessonsTranscript: string[] = [];
       const decisionTranscript: string[] = [];
       const candidatesTranscript: string[] = [];

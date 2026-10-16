@@ -15,7 +15,7 @@
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 import type { SessionRecallConfig } from "./config.js";
 import { log } from "./logger.js";
-import { embedBatch, embedText, cosineSimilarity, type EmbedKind } from "./embeddings.js";
+import { embedBatch, embedText, cosineSimilarity, probeEmbedServerUp, type EmbedKind } from "./embeddings.js";
 import {
   parseScoreTables,
   PINNED_SECTIONS,
@@ -577,6 +577,8 @@ export interface RowStoreMergeOptions {
   excludedPaths?: readonly string[];      // run-start quarantine exclusions (index.ts step 7 / harness loop)
   embed?: (text: string, kind: EmbedKind) => Promise<number[] | null>; // default: C1 embedText
   llmCall?: SignalLlmCall;                // default: the §5.4 seam (5-min constant, maxRetries 0)
+  probeLlmDown?: () => Promise<boolean>;        // infra pre-check: chat endpoint down? (default: real probe; hermetic runs → up)
+  probeEmbedDown?: () => Promise<boolean>;      // infra pre-check: embed endpoint down? (same defaults; 2026-10-16 incident)
   nowMs?: () => number;                   // run timestamp; default Date.now — called ONCE per run
   sessionCountOverride?: number;          // tests pin this; default: the run's SQL count (§3)
   llmBusy?: <T>(fn: () => Promise<T>) => Promise<T | null>; // default: withLlmBusy (skip-not-queue)
@@ -603,7 +605,7 @@ export interface RowStoreSignalDetail {
   candidates: { id: number; item: string; similarity: number }[]; // the hits shown (empty when retrieval never ran or returned none)
   outcome:
     | { kind: "decision"; action: MergeAction; rowId?: number; by: "llm" | "engine"; enrich?: "rewrite" | "none" | "rejected" } // enrich: additive C3.5 token (undefined in C3 — toEqual-safe)
-    | { kind: "skipped"; reason: "embed-null" | "timeout" | "parse-fail" };
+    | { kind: "skipped"; reason: "embed-null" | "timeout" | "parse-fail" | "llm-down" | "embed-down" }; // llm-down/embed-down: infra pre-check down — NO strike (2026-10-16)
 }
 
 export interface RowStoreMergeResult {
@@ -612,7 +614,7 @@ export interface RowStoreMergeResult {
   sessionsFailed: string[];         // session paths with ≥1 failed signal this run (NOT marked merged)
   deferredSessions: number;         // sessions not started because of the run cap
   decisions: RowStoreDecisionRecord[];
-  skipped: { sessionPath: string; signalIndex: number; reason: "embed-null" | "timeout" | "parse-fail" }[];
+  skipped: { sessionPath: string; signalIndex: number; reason: "embed-null" | "timeout" | "parse-fail" | "llm-down" | "embed-down" }[]; // llm-down/embed-down: infra pre-check down — NO strike (2026-10-16)
   signalDetail: RowStoreSignalDetail[]; // per-signal review stream (additive)
   pruned: number;                   // return of pruneStaleRowsInStore
   sessionCount: number;             // the run's value (§3) — harness/report + test asserts
@@ -991,6 +993,27 @@ function defaultSignalLlmCall(): SignalLlmCall {
     summariesCount: 1,
     maxRetries: 0,
   }).then(r => r.text);
+}
+
+/** The infra pre-check (2026-10-16 incident): ONE fast probe of the merge
+ *  model's /v1/models endpoint — refused/unreachable/aborted = the server is
+ *  down. No model discovered → false (nothing to probe; legacy strike
+ *  behavior preserved). */
+const LLM_DOWN_PROBE_TIMEOUT_MS = 3000;
+async function defaultProbeLlmDown(): Promise<boolean> {
+  const pair = buildMergeModelPair();
+  if (!pair) return false;
+  const url = `${pair.modelObj.baseUrl.replace(/\/+$/, "")}/v1/models`;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LLM_DOWN_PROBE_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    return !res.ok;
+  } catch {
+    return true; // refused/reset/aborted — the server is down
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** The C3.5 EXTRACT seam — C3's `defaultSignalLlmCall` body with
@@ -1481,6 +1504,15 @@ export async function mergeSignalsIntoRowStore(
   const compareCall = options.llmCall ?? defaultSignalLlmCall();  // ROWSTORE_MERGE_LLM_TIMEOUT_MS (COMPARE + MERGE — C3 unchanged)
   const excluded = new Set(options.excludedPaths ?? []);
 
+  // Infra pre-check wiring (2026-10-16 incident): a downed endpoint must not
+  // strike sessions. Explicit probe options always win; hermetic runs
+  // (injected llmCall/embed) default to "up" — the injected seam never
+  // touches a real server, so a real probe would test the machine, not the
+  // engine.
+  const hermetic = options.llmCall !== undefined || options.embed !== undefined;
+  const probeLlmDown = options.probeLlmDown ?? (hermetic ? (async () => false) : defaultProbeLlmDown);
+  const probeEmbedDown = options.probeEmbedDown ?? (hermetic ? (async () => false) : async () => probeEmbedServerUp(config.embedServerPort));
+
   const outcome = await llmBusy(async () => {
     // step 4 — oldest-first unmerged sessions; quarantine-excluded paths filtered
     // out here (quarantine-pure — the engine never reads the sentinel store;
@@ -1555,6 +1587,12 @@ export async function mergeSignalsIntoRowStore(
     }
 
     for (const s of started) {
+      // infra pre-check: are the endpoints down RIGHT NOW? A failure while
+      // down is infrastructure, not a record fault — it skips the quarantine
+      // strike (2026-10-16 incident: the 2026-10-13 5001 outage parked 3
+      // unrelated sessions for 7 days; the 2026-10-15 5002 death struck 2
+      // more). The session stays in the backlog for the next run's retry.
+      const [llmDown, embedDown] = await Promise.all([probeLlmDown(), probeEmbedDown()]);
       // the per-attempt timing seam (additive, design §1.2): fires AFTER every
       // attempt of every class (retries included), durationMs = the attempt's
       // wall time, sessionPath = the full session path (the DRY's per-class
@@ -1640,12 +1678,14 @@ export async function mergeSignalsIntoRowStore(
         if (extractFailure === null) lessons.push(...parsed);
       }
       if (extractFailure !== null) {
-        const rec = recordMergeFailure(db, s.path, md5Content(s.content), runNow); // meta only, no row write
-        result.skipped.push({ sessionPath: s.path, signalIndex: -1, reason: extractFailure });
-        result.signalDetail.push({ sessionPath: s.path, signalIndex: -1, signal: "extract-failed", candidates: [], outcome: { kind: "skipped", reason: extractFailure } });
+        const infraDown = llmDown; // EXTRACT is an LLM call — the chat endpoint is the relevant side
+        const skipReason = infraDown ? "llm-down" : extractFailure;
+        const rec = infraDown ? null : recordMergeFailure(db, s.path, md5Content(s.content), runNow); // meta only, no row write; infra → NO strike
+        result.skipped.push({ sessionPath: s.path, signalIndex: -1, reason: skipReason });
+        result.signalDetail.push({ sessionPath: s.path, signalIndex: -1, signal: "extract-failed", candidates: [], outcome: { kind: "skipped", reason: skipReason } });
         result.signalsProcessed++;
-        log(`LTROW MERGE-SKIP reason=${extractFailure} session=${s.path} signal="extract-failed"`); // FULL path — nested subagent files are all named session.jsonl (2026-09-04 quarantine post-mortem)
-        if (rec.failures >= 3) log(`rowstore merge: quarantined ${s.path} (3 consecutive failures)`);
+        log(`LTROW MERGE-SKIP reason=${skipReason} session=${s.path} signal="extract-failed"`); // FULL path — nested subagent files are all named session.jsonl (2026-09-04 quarantine post-mortem)
+        if (rec !== null && rec.failures >= 3) log(`rowstore merge: quarantined ${s.path} (3 consecutive failures)`);
         result.sessionsFailed.push(s.path);
         if (markers.length > 0) {
           // the swept markers must not re-fold (apply-once — D-6): rewrite the
@@ -1676,12 +1716,14 @@ export async function mergeSignalsIntoRowStore(
          *  the 3rd-strike house line. No row write. A match-decision
          *  enrichment failure is NOT a lesson failure (the fail-safe — §4.5). */
         const fail = (reason: "embed-null" | "timeout" | "parse-fail", candidates: CandidateHit[] = []) => {
-          const rec = recordMergeFailure(db, s.path, md5Content(s.content), runNow);
-          result.skipped.push({ sessionPath: s.path, signalIndex: i, reason });
-          result.signalDetail.push({ sessionPath: s.path, signalIndex: i, signal: lesson, candidates: candidates.map(c => ({ id: c.row.id, item: c.row.item, similarity: c.similarity })), outcome: { kind: "skipped", reason } });
+          const infraDown = reason === "embed-null" ? embedDown : llmDown; // the failing stage → its endpoint
+          const skipReason = infraDown ? (reason === "embed-null" ? "embed-down" : "llm-down") : reason;
+          const rec = infraDown ? null : recordMergeFailure(db, s.path, md5Content(s.content), runNow); // infra → NO strike
+          result.skipped.push({ sessionPath: s.path, signalIndex: i, reason: skipReason });
+          result.signalDetail.push({ sessionPath: s.path, signalIndex: i, signal: lesson, candidates: candidates.map(c => ({ id: c.row.id, item: c.row.item, similarity: c.similarity })), outcome: { kind: "skipped", reason: skipReason } });
           result.signalsProcessed++;
-          log(`LTROW MERGE-SKIP reason=${reason} session=${s.path} signal="${lesson}"`);
-          if (rec.failures >= 3) log(`rowstore merge: quarantined ${s.path} (3 consecutive failures)`);
+          log(`LTROW MERGE-SKIP reason=${skipReason} session=${s.path} signal="${lesson}"`);
+          if (rec !== null && rec.failures >= 3) log(`rowstore merge: quarantined ${s.path} (3 consecutive failures)`);
           sessionFailed = true;
         };
         // stages 1–6 via the shared per-lesson pipeline (query embed →
