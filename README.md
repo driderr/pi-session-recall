@@ -47,6 +47,17 @@ RECENT CORRECTIONS (last 7d):
 
 ## Install
 
+**Easiest install (recommended):**
+
+```sh
+pi install npm:pi-self-learn
+```
+
+pi pulls the package and its dependencies from npm. Then restart pi (or
+`/reload`) — the `recall` / `recall-health` tools are available in any session.
+
+**Developer / custom install** — clone and sync to the extensions dir:
+
 ```sh
 git clone https://github.com/driderr/pi-session-recall
 cd pi-session-recall
