@@ -1662,20 +1662,24 @@ export async function mergeSignalsIntoRowStore(
         }
         if (parsed === null) {
           extractFailure = "parse-fail";
-        } else if (parsed.some(l => l.length > LESSON_LINE_MAX_CHARS)) {
-          // task 7.6 — length guard (EXTRACT site): ANY line over budget →
-          // re-ask ONCE (same prompt + blank line + the pinned rejection line —
-          // split permitted). Retry budget: at most ONE retry PER FAILURE CLASS
-          // (parse-garbage OR over-length), hard cap 3 total attempts per
-          // chunk, no loops.
-          const text3 = await extract(prompt + "\n\n" + LESSON_LINE_OVER_LENGTH_REJECTION);
-          if (text3 !== null) {
-            const parsed3 = parseExtractLessons(text3);
-            if (parsed3 !== null && !parsed3.some(l => l.length > LESSON_LINE_MAX_CHARS)) parsed = parsed3;
+        } else {
+          // parsed is non-null in this branch (the null case above always
+          // leaves extractFailure set), so the push below is null-safe.
+          if (parsed.some(l => l.length > LESSON_LINE_MAX_CHARS)) {
+            // task 7.6 — length guard (EXTRACT site): ANY line over budget →
+            // re-ask ONCE (same prompt + blank line + the pinned rejection line —
+            // split permitted). Retry budget: at most ONE retry PER FAILURE CLASS
+            // (parse-garbage OR over-length), hard cap 3 total attempts per
+            // chunk, no loops.
+            const text3 = await extract(prompt + "\n\n" + LESSON_LINE_OVER_LENGTH_REJECTION);
+            if (text3 !== null) {
+              const parsed3 = parseExtractLessons(text3);
+              if (parsed3 !== null && !parsed3.some(l => l.length > LESSON_LINE_MAX_CHARS)) parsed = parsed3;
+            }
+            if (parsed.some(l => l.length > LESSON_LINE_MAX_CHARS)) extractFailure = "parse-fail"; // still over → the EXISTING session-failure policy — no new strike semantics
           }
-          if (parsed.some(l => l.length > LESSON_LINE_MAX_CHARS)) extractFailure = "parse-fail"; // still over → the EXISTING session-failure policy — no new strike semantics
+          if (extractFailure === null) lessons.push(...parsed);
         }
-        if (extractFailure === null) lessons.push(...parsed);
       }
       if (extractFailure !== null) {
         const infraDown = llmDown; // EXTRACT is an LLM call — the chat endpoint is the relevant side

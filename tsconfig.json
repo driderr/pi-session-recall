@@ -6,13 +6,7 @@
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
-    "outDir": "./dist",
-    "baseUrl": ".",
-    "ignoreDeprecations": "6.0",
-    "paths": {
-      "@earendil-works/pi-coding-agent": ["../../../.pi/agent/npm/node_modules/@earendil-works/pi-coding-agent"],
-      "@earendil-works/pi-ai": ["../../../.pi/agent/npm/node_modules/@earendil-works/pi-ai"]
-    },
+    "outDir": "./dist"
   },
   "include": ["*.ts", "vcc/**/*.ts"]
 }

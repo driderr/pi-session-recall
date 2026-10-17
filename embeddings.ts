@@ -194,11 +194,14 @@ export async function embedBatch(texts: string[], kind: EmbedKind): Promise<numb
     }
     const json = (await res.json()) as { data?: { embedding?: unknown }[] };
     const rows = json?.data;
-    const vectors = Array.isArray(rows) ? rows.map((r) => r?.embedding) : [];
+    const raw = Array.isArray(rows) ? rows.map((r) => r?.embedding) : [];
+    // filter + type predicate: isVector is a guard, so every surviving
+    // element is a validated vector — no cast needed at the return site.
+    const vectors = raw.filter((v): v is number[] => isVector(v) && validLength(v, model.dimensions));
     if (
       !Array.isArray(rows) ||
       rows.length !== texts.length ||
-      !vectors.every((v) => isVector(v) && validLength(v, model.dimensions))
+      vectors.length !== raw.length
     ) {
       log(`embed: batch malformed or count mismatch (expected ${texts.length} vectors, got ${Array.isArray(rows) ? rows.length : "non-array"})`);
       return null;

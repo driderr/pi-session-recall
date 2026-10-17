@@ -1725,8 +1725,8 @@ async function llmCallOnceAttempt(
       { messages: [userMessage] },
       callOptions,
     );
-    const textParts = response.content?.filter((c: any) => c.type === "text").length ?? 0;
-    const thinkingParts = response.content?.filter((c: any) => c.type === "thinking").length ?? 0;
+    const textParts = response.content?.filter((c) => c.type === "text").length ?? 0;
+    const thinkingParts = response.content?.filter((c) => c.type === "thinking").length ?? 0;
     log(`Merge raw: stopReason=${response.stopReason}, textParts=${textParts}, thinkingParts=${thinkingParts}, latency=${Date.now() - attemptStart}ms`);
     // C2 FIX: Handle stopReason=length — truncated response is not valid
     // NEW branch — before the length/non-array/text checks (design §2.2 item 3):
