@@ -4,3 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # Deliberately version-pinned to the deployed runtime: pi-ai 0.78.x (the
+      # extension's own runtime manifest) and pi-coding-agent at the pi host
+      # version. Bumping either requires a coordinated code + deploy change,
+      # not a standalone update — remove these entries when the pins move.
+      - dependency-name: "@earendil-works/pi-ai"
+      - dependency-name: "@earendil-works/pi-coding-agent"
