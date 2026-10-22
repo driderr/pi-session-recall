@@ -27,9 +27,11 @@ import {
   sqliteReadUnmergedSessionSummaries,
   sqliteCountUnmergedSessions,
   readMergeQuarantine,
+  buildMergeModelPair,
+  waitForLlmEndpointReady,
 } from "../summarizer.js";
 import { ensureEmbedServer } from "../embeddings.js";
-import { ensureRowStoreSchema, getRows, mergeSignalsIntoRowStore } from "../rowstore.js";
+import { ensureRowStoreSchema, getRows, mergeSignalsIntoRowStore, type RowStoreMergeOptions } from "../rowstore.js";
 import { G } from "../types.js";
 import { runRecallFlush } from "../index.js";
 
@@ -188,15 +190,16 @@ const unmergedOf = (path: string): string | null =>
 /** Wire the module-boundary engine mock to delegate to the REAL engine with the
  *  injected seams (embed / llmCall / nowMs / sessionCountOverride — the house
  *  "every seam is injected" rule). `before`/`after` run around each delegated
- *  call (the concurrent-append seam). Returns a call counter. */
+ *  call (the concurrent-append seam). Returns a call counter plus the options the
+ *  most recent delegated run was given. */
 function delegateEngine(
   embed: (text: string, kind: string) => Promise<number[] | null>,
   llm: (prompt: string) => Promise<string | null>,
   before?: (callNo: number) => void,
   after?: (callNo: number) => void,
-): { calls: () => number } {
+): { calls: () => number; lastOpts: () => RowStoreMergeOptions | undefined } {
   let n = 0;
-  const optsSeen: any[] = [];
+  const optsSeen: RowStoreMergeOptions[] = [];
   vi.mocked(mergeSignalsIntoRowStore).mockImplementation(async (dbArg: any, cfg: SessionRecallConfig, opts: any) => {
     n++;
     optsSeen.push(opts);
@@ -273,7 +276,9 @@ describe("recall-flush: the flush loop (runRecallFlush)", () => {
     for (let i = 1; i <= 6; i++) seedUnmerged(P(i), CONTENT(i), T(i));
     const { calls, lastOpts } = delegateEngine(makeEmbed().fn, scriptLlmCall("(none)").fn);
     const out = await runRecallFlush({ db, sleepMs: async () => {} });
-    expect(lastOpts().extractCapOverride).toBe(5); // the flush's batch — FLUSH RUN is mid-run progress (decided 2026-09-04)
+    const finalRunOpts = lastOpts();
+    expect(finalRunOpts, "the flush must have delegated at least one engine run").toBeDefined();
+    expect(finalRunOpts?.extractCapOverride).toBe(5); // the flush's batch — FLUSH RUN is mid-run progress (decided 2026-09-04)
     expect(calls()).toBe(2); // batched: run 1 takes 5 (the cap), run 2 takes the last one
     expect(messages.filter(m => m === "LTROW MODE ROWSTORE")).toHaveLength(2); // the engine ran exactly twice
     expect(sqliteCountUnmergedSessions(db)).toBe(0);
@@ -388,5 +393,22 @@ describe("recall-flush: the flush loop (runRecallFlush)", () => {
     expect(sent.failures).toBe(1);          // A struck once in run 1
     expect(sent.quarantinedAt).toBeNull();  // not terminal
     expect(unmergedOf(P(1))).toBeNull();    // A marked merged in run 2
+  });
+
+  it("(11) fix 2: the model endpoint never answers - the flush is rejected before any fold work", async () => {
+    for (let i = 1; i <= 3; i++) seedUnmerged(P(i), CONTENT(i), T(i));
+    const { calls } = delegateEngine(makeEmbed().fn, scriptLlmCall('(none)').fn);
+    vi.mocked(buildMergeModelPair).mockReturnValue({ modelObj: { baseUrl: 'http://127.0.0.1:5001/v1' } as any, apiKey: 'sk-none' });
+    vi.mocked(waitForLlmEndpointReady).mockReset().mockResolvedValue(false);
+
+    const out = await runRecallFlush({ db, sleepMs: async () => {} });
+
+    expect(out).toContain('the model endpoint is not answering');
+    expect(messages).toContain('FLUSH REJECTED reason=llm-endpoint-unready endpoint=http://127.0.0.1:5001/v1');
+    expect(messages.filter(m => m.startsWith('FLUSH START'))).toHaveLength(0); // no drain started
+    expect(calls()).toBe(0);                          // the engine never ran
+    expect(getRows(db)).toHaveLength(0);              // zero rows written
+    expect(sqliteCountUnmergedSessions(db)).toBe(3);  // nothing lost - all still unmerged
+    expect(G.__sessionRecallMergeInProgress__).toBe(false); // cleared in finally (the reject is inside the try)
   });
 });

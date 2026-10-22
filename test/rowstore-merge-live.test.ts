@@ -103,7 +103,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as logger from "../logger.js";
-import { mergeSignalsIntoRowStore, EXTRACT_LLM_TIMEOUT_MS, insertRow, normalizeLesson, type RowStoreMergeResult, type RowStoreSignalDetail } from "../rowstore.js";
+import { mergeSignalsIntoRowStore, EXTRACT_LLM_TIMEOUT_MS, insertRow, normalizeLesson, type RowStoreSignalDetail } from "../rowstore.js";
 import { ensureEmbedServer, embedText } from "../embeddings.js";
 import { sqliteReadLongTerm, sqliteReadUnmergedSessionSummaries, pruneMergeQuarantine, buildMergeModelPair, llmCallOnce } from "../summarizer.js";
 import { loadConfigOnce } from "../config.js";
@@ -581,7 +581,7 @@ function emptyDryAgg() {
   };
 }
 
-function filledDryAgg() {
+function filledDryAgg(): DryAgg {
   const tmp = "C:\\Users\\test\\AppData\\Local\\Temp\\rowstore-lessons-x7k2";
   const h64a = "9c1f3a7d4b2e8f6a0c5d7e9b3a1f8c4e6d2b9a7f5c3e1d8b4a6f0c9e2d7b5a38";
   return {
@@ -1663,7 +1663,7 @@ describe.runIf(process.env.ROWSTORE_LESSONS_DRY === "1")("rowstore-lessons vehic
         runs, sessionsStarted: startedSet.size, lessons, marked, failed, quarantined, drained,
         extractCalls: drainExtractCalls, chunkedSessions: chunkedSet.size,
         decisionHist, skipHist,
-        lessonsTranscript, decisionTranscript, candidatesTranscript,
+        lessonsTranscript, decisionTranscript, candidatesTranscript, enrichTranscript, skipTranscript,
         signalDetail,
         emptySessions,
         pooled,
@@ -1980,7 +1980,7 @@ describe.runIf(process.env.ROWSTORE_LESSONS_LIVE === "1")("rowstore-lessons vehi
         runs, sessionsStarted: startedSet.size, lessons, marked, failed, quarantined, drained,
         extractCalls: drainExtractCalls, chunkedSessions: chunkedSet.size,
         decisionHist, skipHist,
-        lessonsTranscript, decisionTranscript, candidatesTranscript,
+        lessonsTranscript, decisionTranscript, candidatesTranscript, enrichTranscript, skipTranscript,
         signalDetail,
         emptySessions,
         pooled,

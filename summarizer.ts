@@ -14,8 +14,11 @@ import { mergePrevious as vccMergePrevious } from "./vcc/index.js";
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 import { G } from "./types.js"; // Typed globalThis accessor
 
-// Runtime extension: pi-ai uses compat.thinkingFormat but it's not in the type
-interface ModelWithCompat extends Model<any> {
+// The model object this repo hands to pi-ai's complete(): pi-ai types `compat`
+// per api (OpenAICompletionsCompat.thinkingFormat), so this extension pins the
+// thinking form it needs from llama.cpp. Exported because buildMergeModelPair
+// returns it and the live vehicles build the same shape.
+export interface ModelWithCompat extends Model<any> {
   compat: { thinkingFormat: "qwen-chat-template" };
 }
 import type { SessionRecallConfig } from "./config.js";
@@ -38,30 +41,53 @@ export interface LongTermSummary {
 // ─── SQLite Cache Layer (primary storage) ─────────────────────────────
 // better-sqlite3 is a sync library but ESM requires async import.
 // openCacheDb is async — first call loads the module, subsequent calls return cached DB.
-let _cacheDb: BetterSqliteDb | null = null;
-let _cacheDbFailCount = 0;
+// The connection and its failure counter live on globalThis, not in module scope. pi
+// re-reads this module on every /reload, and module-scope values start empty again on
+// each load, so the old module variables let every load open one more connection to
+// the same database file. Sharing them through G keeps one connection and one failure
+// budget per process; closeCacheDb clears the global so a later call can reopen.
 const MAX_CACHE_RETRIES = 3;
 
 export function closeCacheDb(): void {
-  if (_cacheDb) {
-    try { _cacheDb.close(); } catch { /* ignore */ }
-    _cacheDb = null;
-    _cacheDbFailCount = 0;
+  const shared = G.__sessionRecallCacheDb__;
+  if (shared) {
+    try { shared.close(); } catch { /* ignore */ }
+    G.__sessionRecallCacheDb__ = undefined;
+    G.__sessionRecallCacheDbFailCount__ = 0;
   }
 }
 
 export async function openCacheDb(): Promise<BetterSqliteDb | null> {
-  if (_cacheDb) return _cacheDb;
-  if (_cacheDbFailCount >= MAX_CACHE_RETRIES) return null;
+  const shared = G.__sessionRecallCacheDb__;
+  if (shared) return shared;
+  if ((G.__sessionRecallCacheDbFailCount__ ?? 0) >= MAX_CACHE_RETRIES) return null;
+  // Two callers can reach this point together: the driver import below is awaited, and
+  // the connection is stored only after it resolves. Without this shared wait each of
+  // them opens its own connection, and the losing one stays open with no reference to
+  // it. Later callers return the same promise instead of opening another connection.
+  const pending = G.__sessionRecallCacheDbOpening__;
+  if (pending) return pending;
+  const opening = openSharedCacheDb();
+  G.__sessionRecallCacheDbOpening__ = opening;
+  return opening;
+}
+
+// The one open attempt behind that shared wait: driver import, connection, schema, then
+// the shared store. It never rejects — a failure raises the shared failure counter and
+// resolves to null — and it always clears the shared wait, so a later call can retry.
+async function openSharedCacheDb(): Promise<BetterSqliteDb | null> {
   try {
     const mod = await import("better-sqlite3");
     const Database = mod.default || mod;
-    _cacheDb = new Database(SQLITE_PATH);
-    ensureSchema(_cacheDb);
-    return _cacheDb;
+    const db: BetterSqliteDb = new Database(SQLITE_PATH);
+    ensureSchema(db);
+    G.__sessionRecallCacheDb__ = db;
+    return db;
   } catch {
-    _cacheDbFailCount++;
+    G.__sessionRecallCacheDbFailCount__ = (G.__sessionRecallCacheDbFailCount__ ?? 0) + 1;
     return null;
+  } finally {
+    G.__sessionRecallCacheDbOpening__ = undefined;
   }
 }
 
@@ -1581,14 +1607,15 @@ export function buildMergeModelPair(discovered?: PrimaryModelInfo): { modelObj: 
   // Legacy passes the already-discovered info (keeps the getPrimaryModel log line exactly once);
   // zero-arg callers (the C3 row-store seam, tests) get a SILENT discovery — the shared surface
   // emits no log lines of its own (T3 byte pins).
-  const config = discovered ? null : loadModelConfig();
-  const modelInfo = discovered ?? (config ? resolvePrimaryModel(config) : null);
+  // A captured session model is preferred over models.json order (fix 1);
+  // `config` is only read when neither an explicit discovery nor a capture exists.
+  const config = discovered || sessionModelInfo ? null : loadModelConfig();
+  const modelInfo = discovered ?? sessionModelInfo ?? (config ? resolvePrimaryModel(config) : null);
   if (!modelInfo) return null;
   // R1: Model object with correct compat for llama.cpp + Qwen.
   // reasoning: true is REQUIRED so buildParams() enters the qwen-chat-template branch.
   // Without reasoning: true, the branch is skipped and enable_thinking is never sent.
   // thinkingFormat: "qwen-chat-template" sends chat_template_kwargs to llama.cpp.
-  // reasoningEffort: "low" → sends enable_thinking: true (thinking enabled for merge).
   const modelObj = {
     provider: modelInfo.provider,
     id: modelInfo.modelId,
@@ -1596,7 +1623,7 @@ export function buildMergeModelPair(discovered?: PrimaryModelInfo): { modelObj: 
     api: modelInfo.api,
     baseUrl: modelInfo.baseUrl,
     reasoning: true,
-    compat: { thinkingFormat: "qwen-chat-template" },
+    compat: modelInfo.compat ?? { thinkingFormat: "qwen-chat-template" },
     input: modelInfo.input,
     maxTokens: modelInfo.maxTokens,
     contextWindow: modelInfo.contextWindow,
@@ -1616,6 +1643,16 @@ export function buildMergeModelPair(discovered?: PrimaryModelInfo): { modelObj: 
 export const FOLD_LLM_READY_TIMEOUT_MS = 90_000;   // the whole wait — never hold a fold longer than this
 export const FOLD_LLM_READY_POLL_MS = 3_000;       // probe cadence
 export const FOLD_LLM_READY_PROBE_TIMEOUT_MS = 5_000; // per-probe watchdog (a hung accept-never-respond server cannot eat the whole window)
+// Fix 2 (2026-10-22): a refused port keeps a SHORTER window. The 90 s window
+// covers "the server is there but not answering yet"; a refused connection here
+// means llama-server is down, and a restart (model load) never finishes inside
+// 90 s either — so the long window only ever absorbed a brief blip. 15 s still
+// does that, at one sixth the cost.
+export const FOLD_LLM_READY_REFUSED_TIMEOUT_MS = 15_000;
+// Fix 2: one failed wait per URL is remembered briefly. Three fold entry points
+// can ask in a single session start (recall flush, the row-store leg, the
+// legacy leg); without this, the second and third each re-paid the window.
+export const FOLD_LLM_READY_FAILURE_MEMO_MS = 60_000;
 
 export interface LlmReadyWaitIo {
   sleep?: (ms: number) => Promise<void>;
@@ -1623,15 +1660,54 @@ export interface LlmReadyWaitIo {
   fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>; // widened from typeof fetch so test seams can take a plain string url
 }
 
+export type ProbeFailureKind = "refused" | "unreachable" | "aborted" | "unknown";
+
+/** Classify a probe failure by walking the error and its cause chain.
+ *  refused    — nothing is listening on the port (the crash/wobble signature).
+ *  unreachable — the address itself does not exist or is unroutable; waiting
+ *               cannot help, so the caller should not pay any window.
+ *  aborted    — our own per-probe watchdog fired (the server accepted and hung).
+ *  unknown    — anything else; treated as wobble, full window. */
+export function classifyProbeError(err: unknown): ProbeFailureKind {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; depth < 5 && cur; depth++) {
+    const c = cur as { code?: unknown; cause?: unknown; name?: unknown };
+    if (typeof c.code === "string") parts.push(c.code.toUpperCase());
+    if (typeof c.name === "string") parts.push(c.name.toUpperCase());
+    cur = c.cause;
+  }
+  const text = parts.join(" ") + " " + String(err).toUpperCase();
+  if (/\bENOTFOUND\b|\bEAI_AGAIN\b|\bEHOSTUNREACH\b|\bENETUNREACH\b|\bEADDRNOTAVAIL\b|NAME NOT RESOLVED/.test(text)) return "unreachable";
+  if (/\bECONNREFUSED\b|CONNECTION REFUSED/.test(text)) return "refused";
+  if (/ABORT|\bTIMEOUTERROR\b|TIMED OUT/.test(text)) return "aborted";
+  return "unknown";
+}
+
+// URL -> wall-clock ms of its most recent failed wait (fix 2).
+const llmReadyFailures = new Map<string, number>();
+
+/** Test seam (and a manual reset for a restarted server): forget failed waits. */
+export function clearLlmReadyMemo(): void {
+  llmReadyFailures.clear();
+}
+
 /**
  * Wait (bounded) until the merge LLM's OpenAI endpoint answers
- * GET {baseUrl}/models. true = answered within the window (or no baseUrl to wait
- * on — the engine's no-model path handles that); false = timed out, the caller
- * proceeds anyway — a failed fold no longer stamps the last-fold sentinel, so
- * the next session start retries without the interval lockout. Steady state
- * (first probe OK) resolves with exactly one probe and zero delay.
- * Log discipline: silent when the first probe succeeds; one LLM-WAIT line when
- * the wait begins, one when it ends (ready or timeout).
+ * GET {baseUrl}/models. true = the endpoint ANSWERED (any HTTP status counts —
+ * a server that returns 404 for /models is still a server that will answer the
+ * LLM call), or there is no baseUrl to wait on (the engine's no-model path
+ * handles that). false = nothing answered: the window expired, or the address
+ * is unreachable and was given up on at once.
+ * A failed fold does not stamp the last-fold sentinel, so the next session
+ * start retries without the interval lockout.
+ * Windows (fix 2, 2026-10-22): full FOLD_LLM_READY_TIMEOUT_MS for an unknown or
+ * hung endpoint, FOLD_LLM_READY_REFUSED_TIMEOUT_MS once a probe reports a
+ * refused port, zero for an unreachable address. Steady state (first probe
+ * answers) resolves with exactly one probe and zero delay.
+ * Log discipline: silent when the first probe answers 200; one LLM-WAIT line
+ * when the wait begins, one when it ends, one when a refusal shortens the
+ * window, one when a recent failure is reused instead of re-paying.
  */
 export async function waitForLlmEndpointReady(baseUrl: string | undefined, io: LlmReadyWaitIo = {}): Promise<boolean> {
   if (!baseUrl) return true;
@@ -1640,30 +1716,61 @@ export async function waitForLlmEndpointReady(baseUrl: string | undefined, io: L
   const doFetch = io.fetchImpl ?? fetch;
   const url = `${baseUrl.replace(/\/+$/, "")}/models`;
   const startedAt = now();
-  const deadline = startedAt + FOLD_LLM_READY_TIMEOUT_MS;
-  let waiting = false;
-  for (;;) {
-    if (now() >= deadline) {
-      log(`LLM-WAIT timeout after ${now() - startedAt}ms endpoint=${url} — proceeding anyway (a failed fold does not stamp the last-fold sentinel)`);
-      return false;
-    }
+  const probeOnce = async (): Promise<{ status: number | null; kind: ProbeFailureKind | null }> => {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), Math.min(FOLD_LLM_READY_PROBE_TIMEOUT_MS, Math.max(1, deadline - now())));
-    let ready = false;
+    const timer = setTimeout(() => controller.abort(), FOLD_LLM_READY_PROBE_TIMEOUT_MS);
     try {
       const res = await doFetch(url, { signal: controller.signal });
-      ready = res.status === 200;
-    } catch {
-      ready = false; // network error or probe abort — not answering yet
+      return { status: res.status, kind: null };
+    } catch (err) {
+      return { status: null, kind: classifyProbeError(err) };
     } finally {
       clearTimeout(timer);
     }
-    if (ready) {
-      if (waiting) log(`LLM-WAIT ready after ${now() - startedAt}ms endpoint=${url}`);
+  };
+  // A wait that just failed for this URL: pay ONE probe, not another window.
+  const failedAt = llmReadyFailures.get(url);
+  if (failedAt !== undefined && now() - failedAt < FOLD_LLM_READY_FAILURE_MEMO_MS) {
+    const quick = await probeOnce();
+    if (quick.status !== null) {
+      llmReadyFailures.delete(url);
+      log(`LLM-WAIT endpoint=${url} answering again (HTTP ${quick.status}) after a failure ${now() - failedAt}ms ago`);
       return true;
     }
-    if (!waiting) { log(`LLM-WAIT waiting for ${url} (bounded ${FOLD_LLM_READY_TIMEOUT_MS}ms, poll ${FOLD_LLM_READY_POLL_MS}ms)`); waiting = true; }
-    await sleep(Math.min(FOLD_LLM_READY_POLL_MS, Math.max(0, deadline - now())));
+    llmReadyFailures.set(url, now());
+    log(`LLM-WAIT memo endpoint=${url} still failing (${now() - failedAt}ms since the last failed wait) — skipping the wait`);
+    return false;
+  }
+  const deadline = startedAt + FOLD_LLM_READY_TIMEOUT_MS;
+  let effectiveDeadline = deadline;
+  let waiting = false;
+  for (;;) {
+    if (now() >= effectiveDeadline) {
+      llmReadyFailures.set(url, now());
+      log(`LLM-WAIT timeout after ${now() - startedAt}ms endpoint=${url} — giving up, fold skipped (a failed fold does not stamp the last-fold sentinel, so the next session start retries)`);
+      return false;
+    }
+    const probe = await probeOnce();
+    if (probe.status !== null) {
+      llmReadyFailures.delete(url);
+      if (probe.status !== 200) {
+        log(`LLM-WAIT endpoint=${url} answered HTTP ${probe.status} — the server is listening (/models may be unsupported), treating it as ready`);
+      } else if (waiting) {
+        log(`LLM-WAIT ready after ${now() - startedAt}ms endpoint=${url}`);
+      }
+      return true;
+    }
+    if (probe.kind === "unreachable") {
+      llmReadyFailures.set(url, now());
+      log(`LLM-WAIT endpoint=${url} unreachable — no address to wait for, giving up after ${now() - startedAt}ms`);
+      return false;
+    }
+    if (probe.kind === "refused" && effectiveDeadline === deadline) {
+      effectiveDeadline = startedAt + FOLD_LLM_READY_REFUSED_TIMEOUT_MS;
+      log(`LLM-WAIT endpoint=${url} refused the connection — shortening the wait to ${FOLD_LLM_READY_REFUSED_TIMEOUT_MS}ms (a down server is not a server that is loading)`);
+    }
+    if (!waiting) { log(`LLM-WAIT waiting for ${url} (bounded ${Math.max(0, effectiveDeadline - startedAt)}ms, poll ${FOLD_LLM_READY_POLL_MS}ms)`); waiting = true; }
+    await sleep(Math.min(FOLD_LLM_READY_POLL_MS, Math.max(0, effectiveDeadline - now())));
   }
 }
 
@@ -1973,6 +2080,10 @@ export interface PrimaryModelInfo {
   maxTokens: number;
   contextWindow: number;
   cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  // Carried through from a captured session model so its own compat settings
+  // survive; absent for a models.json discovery (the qwen-chat-template
+  // default in buildMergeModelPair then applies, exactly as before).
+  compat?: { thinkingFormat?: string; [key: string]: unknown };
 }
 
 /** Pure resolver — no log (shared by getPrimaryModel and the C3 buildMergeModelPair). */
@@ -1998,6 +2109,14 @@ function resolvePrimaryModel(config: ModelConfig): PrimaryModelInfo | null {
 }
 
 export function getPrimaryModel(): PrimaryModelInfo | null {
+  // Fix 1 (2026-10-22): a model captured from the live session wins over
+  // models.json order. Without this the fold ran against the FIRST provider in
+  // models.json while the session used another one — 90 s of LLM-WAIT per
+  // attempt against a server nobody was running, then every lesson failed.
+  if (sessionModelInfo) {
+    log(`getPrimaryModel: session model ${sessionModelInfo.provider}/${sessionModelInfo.modelId}`);
+    return sessionModelInfo;
+  }
   const config = loadModelConfig();
   if (!config) return null;
   const providers = Object.entries(config.providers);
@@ -2009,6 +2128,98 @@ export function getPrimaryModel(): PrimaryModelInfo | null {
   if (!modelInfo) return null;
   log(`getPrimaryModel: ${modelInfo.provider}/${modelInfo.modelId}`);
   return modelInfo;
+}
+
+// ─── Session model capture (fix 1, 2026-10-22) ───────────────────────────────
+// The merge/extract LLM must be the model THIS session is using. index.ts
+// refreshes this capture from `ctx.model` at session_start and on the
+// `model_select` event, so a /model switch moves the fold to the new
+// server on the next attempt. models.json stays the
+// fallback: the env-gated live vehicles (test/rowstore-live, lt-conversion-live)
+// run outside Pi, where no context model exists.
+// Pi's Model is read structurally — summarizer.ts must not import pi.
+export interface PiModelLike {
+  provider: string;
+  id: string;
+  name?: string;
+  api: string;
+  baseUrl: string;
+  apiKey?: string;
+  reasoning?: boolean;
+  compat?: { thinkingFormat?: string; [key: string]: unknown };
+  input?: ("text" | "image")[];
+  maxTokens?: number;
+  contextWindow?: number;
+  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+}
+
+export interface CaptureModelCtxLike {
+  model?: PiModelLike;
+  // pi's ModelRegistry facade ("Model registry for API key resolution").
+  // Method shorthand on purpose: pi's ModelRegistry.getApiKeyAndHeaders takes
+  // its own Model type, and a property-style signature would be checked
+  // contravariantly against PiModelLike and reject it.
+  modelRegistry?: { getApiKeyAndHeaders?(model: unknown): Promise<{ ok: boolean; apiKey?: string }> };
+}
+
+let sessionModelInfo: PrimaryModelInfo | null = null;
+
+/** Structural pi Model → PrimaryModelInfo. null for anything unusable. */
+export function toPrimaryModelInfo(model: PiModelLike | undefined | null): PrimaryModelInfo | null {
+  if (!model || typeof model.provider !== "string" || !model.provider) return null;
+  if (typeof model.id !== "string" || !model.id) return null;
+  return {
+    provider: model.provider,
+    modelId: model.id,
+    name: model.name || model.id,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    apiKey: typeof model.apiKey === "string" ? model.apiKey : "",
+    reasoning: Boolean(model.reasoning),
+    compat: model.compat,
+    input: model.input || ["text"],
+    maxTokens: model.maxTokens || 4096,
+    contextWindow: model.contextWindow || 128000,
+    cost: model.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+}
+
+/** Capture the session's model. A context without a usable model CLEARS the
+ *  capture (the models.json fallback then applies again). The key is resolved
+ *  through pi's registry when one is reachable; a rejecting registry never
+ *  loses the model — buildMergeModelPair keeps its "sk-none" fallback. */
+export async function captureSessionModel(ctx: CaptureModelCtxLike | undefined): Promise<PrimaryModelInfo | null> {
+  const info = toPrimaryModelInfo(ctx?.model);
+  if (!info) {
+    if (sessionModelInfo) log("SESSION MODEL cleared — no model in the extension context");
+    sessionModelInfo = null;
+    return null;
+  }
+  const registry = ctx?.modelRegistry;
+  if (registry && typeof registry.getApiKeyAndHeaders === "function" && ctx?.model) {
+    try {
+      const auth = await registry.getApiKeyAndHeaders(ctx.model);
+      if (auth && auth.ok && typeof auth.apiKey === "string" && auth.apiKey) info.apiKey = auth.apiKey;
+    } catch (err) {
+      log(`SESSION MODEL key lookup failed (${String(err).slice(0, 100)}) — keeping the model, key falls back to sk-none`);
+    }
+  }
+  const moved =
+    !sessionModelInfo ||
+    sessionModelInfo.provider !== info.provider ||
+    sessionModelInfo.modelId !== info.modelId ||
+    sessionModelInfo.baseUrl !== info.baseUrl;
+  sessionModelInfo = info;
+  if (moved) log(`SESSION MODEL ${info.provider}/${info.modelId} (${info.baseUrl})`);
+  return info;
+}
+
+export function getSessionModel(): PrimaryModelInfo | null {
+  return sessionModelInfo;
+}
+
+export function clearSessionModel(): void {
+  sessionModelInfo = null;
 }
 
 export function sessionPathHash(sessionPath: string): string {

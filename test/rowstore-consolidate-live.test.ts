@@ -173,7 +173,7 @@ const validatePlan = (plan: Plan, rows: RowRec[]): void => {
     expect(op.action, `op ${op.id}: action is null — every cluster must be explicitly adjudicated ("merge" or "keep")`).not.toBeNull();
     const memberRows = op.members.map(id => {
       const r = byId.get(id);
-      expect(r, `op ${op.id}: row ${id} not found in the current store (plan stale? re-run PLAN mode; LIVE is one-shot per plan)`).toBeTruthy();
+      if (!r) throw new Error(`op ${op.id}: row ${id} not found in the current store (plan stale? re-run PLAN mode; LIVE is one-shot per plan)`);
       expect(seen.has(id), `op ${op.id}: row ${id} is claimed by more than one op`).toBe(false);
       seen.add(id);
       return r;
@@ -200,7 +200,7 @@ const precomputeEmbeddings = async (plan: Plan, rows: RowRec[]): Promise<Map<num
     if (op.action !== "merge" || !op.mergedText) continue;
     if (op.mergedText === byId.get(op.keep)!.item) continue; // identical — no re-embed
     const vec = await embedText(op.mergedText, "document");
-    expect(vec, `op ${op.id}: re-embed of mergedText returned null (embed server down?) — aborting before any write`).not.toBeNull();
+    if (!vec) throw new Error(`op ${op.id}: re-embed of mergedText returned null (embed server down?) - aborting before any write`);
     out.set(op.keep, vec);
   }
   return out;
@@ -418,7 +418,7 @@ const runConsolidation = async (mode: "dry" | "live"): Promise<void> => {
     `sha256 main before=${walOrAbsent(before.main)} after=${walOrAbsent(after.main)} status=${after.main === before.main ? "IDENTICAL" : mode === "live" ? "CHANGED (expected — live mode writes)" : "CHANGED (UNEXPECTED)"}`,
     `sha256 -wal before=${walOrAbsent(before.wal)} after=${walOrAbsent(after.wal)} status=${after.wal === before.wal ? "IDENTICAL" : "CHANGED/ABSENT (reported, not asserted — active Pi session)"}`,
     `long_term blob byte-identical=${blobAfter === blobBefore ? "yes" : "no"}`,
-    `rowstore_state: rows=${prodAfter.count === prodBefore.count ? "IDENTICAL" : "CHANGED"} sentinels=${prodAfter.sentinelHash === prodBefore.sentinelHash ? "IDENTICAL" : "CHANGED"} unmerged=${prodAfter.unmergedCount >= prodBefore.unmergedCount ? "NOT-REDUCED" : "REDUCED"}`,
+    `rowstore_state: rows=${prodAfter.count === prodBefore.count ? "IDENTICAL" : "CHANGED"} sentinels=${prodAfter.sentinelsHash === prodBefore.sentinelsHash ? "IDENTICAL" : "CHANGED"} unmerged=${prodAfter.unmergedCount >= prodBefore.unmergedCount ? "NOT-REDUCED" : "REDUCED"}`,
   ].join("\n");
   console.log(report);
 
@@ -430,12 +430,12 @@ const runConsolidation = async (mode: "dry" | "live"): Promise<void> => {
     // boundaries (the 2026-08-31 8.1 re-run #2 lesson, C3 pattern).
     expect(prodAfter.count, "DRY: production row count must be untouched").toBe(prodBefore.count);
     expect(prodAfter.itemsHash, "DRY: production row items must be untouched").toBe(prodBefore.itemsHash);
-    expect(prodAfter.sentinelHash, "DRY: sentinels must be untouched").toBe(prodBefore.sentinelHash);
+    expect(prodAfter.sentinelsHash, "DRY: sentinels must be untouched").toBe(prodBefore.sentinelsHash);
     expect(prodAfter.unmergedCount, "DRY: unmerged count must not DECREASE (live session only adds)").toBeGreaterThanOrEqual(prodBefore.unmergedCount);
     expect(targetAfter.count, "DRY: copy row count must equal before - deleted").toBe(rowstoreBefore - deletedTotal);
   } else {
     expect(prodAfter.count, "LIVE: production row count must equal before - deleted").toBe(expectedProdCount);
-    expect(prodAfter.sentinelHash, "LIVE: merge_quarantine sentinels must be untouched").toBe(prodBefore.sentinelHash);
+    expect(prodAfter.sentinelsHash, "LIVE: merge_quarantine sentinels must be untouched").toBe(prodBefore.sentinelsHash);
     // Exact item-set check: every non-deleted row unchanged except planned survivors.
     const deleteSet = new Set(mergeOps.flatMap(op => op.delete));
     const ro3 = new Database(SQLITE_PATH, { readonly: true });

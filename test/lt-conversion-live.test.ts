@@ -13,7 +13,7 @@ import { describe, it, expect } from "vitest";
 import { createRequire } from "node:module";
 import { mockCompleteQueue, mockCompleteReset, mockCompleteCalls, complete as mockComplete } from "@earendil-works/pi-ai";
 import * as realPiAi from "../node_modules/@earendil-works/pi-ai/dist/index.js";
-import { getPrimaryModel, openCacheDb, sqliteReadLongTerm, runLtTableConversion, validateTableSummary, sqliteGetMeta, sqliteCountUnmergedSessions, LT_TABLE_CONVERSION_FLAG_KEY, LT_TABLE_CONVERSION_BACKUP_KEY } from "../summarizer.js";
+import { getPrimaryModel, type ModelWithCompat, openCacheDb, sqliteReadLongTerm, runLtTableConversion, validateTableSummary, sqliteGetMeta, sqliteCountUnmergedSessions, LT_TABLE_CONVERSION_FLAG_KEY, LT_TABLE_CONVERSION_BACKUP_KEY } from "../summarizer.js";
 import { loadConfigOnce } from "../config.js";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,7 +88,7 @@ describe.runIf(process.env.LT_LIVE_DRY === "1")("Task 0 dry-run spike (design §
       // One real LLM call — real complete() past the alias, forwarded through the recording mock.
       const modelInfo = getPrimaryModel();
       expect(modelInfo, "primary model must be configured (models.json)").toBeTruthy();
-      const modelObj = {
+      const modelObj: ModelWithCompat = {
         provider: modelInfo!.provider,
         id: modelInfo!.modelId,
         name: modelInfo!.name,

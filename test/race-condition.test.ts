@@ -89,7 +89,7 @@ describe("race condition guards", () => {
     // reassigned between try and finally (e.g., by a concurrent call), the
     // delete would operate on the wrong object, permanently locking the session.
 
-    const mergeMapA = { "/session/A.jsonl": true };
+    const mergeMapA: Record<string, boolean> = { "/session/A.jsonl": true }; // the type production declares (types.ts __sessionRecallVccMerge__)
     G.__sessionRecallVccMerge__ = mergeMapA;
 
     // Simulate: between try and finally, another call reassigns the global

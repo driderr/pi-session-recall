@@ -15,7 +15,7 @@ import {
   accumulateDriftEvents,
 } from "../summarizer.js";
 import type { InjectionIo } from "../summarizer.js";
-import type { SessionRecallConfig } from "../config.js";
+import { DEFAULT_CONFIG, type SessionRecallConfig } from "../config.js";
 import type { DiscoveredSession } from "../discoverer.js";
 import { ensureRowStoreSchema, getRowsForInjection, getRecentCorrections } from "../rowstore.js";
 import { recentCorrectionsSection } from "../summarizer.js";
@@ -109,24 +109,12 @@ async function buildRecallOutputDisplay(
 
 // ─── Fixtures ──────────────────────────────────────────────────────────
 
+// The shipped defaults with this test's tighter ceiling. Spreading DEFAULT_CONFIG
+// is deliberate: a config field added later can never go missing from this
+// fixture the way the hand-written copy below used to allow.
 const defaultConfig: SessionRecallConfig = {
-  maxSessions: 10,
-  maxTokens: 500,
-  sessionScope: "all",
-  ignorePatterns: [],
-  summarizeTimeoutMs: 600000,
-  longTermMaxChars: 5000,
-  longTermMinIntervalMs: 14400000,
-  longTermMinTurns: 10,
-  briefTranscriptCap: 120,
-  mergeChunkChars: 24000,
-  mergeDrainIntervalMs: 1800000,
-  mergeMaxChunksPerRun: 8,
-  recencyHalfLifeSessions: 50,
-  stalePruneAfterSessions: 100,
-  stalePruneMinScore: 3,
-  longTermHardMaxChars: 8000,
-  injectShortTerm: false,
+  ...DEFAULT_CONFIG,
+  longTermHardMaxChars: 8000, // tighter than the shipped 20000 — this test pins the ceiling
 };
 
 const flagOnConfig: SessionRecallConfig = {

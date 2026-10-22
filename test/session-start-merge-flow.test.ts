@@ -32,6 +32,8 @@ import defaultExport from "../index.js";
 import { loadConfigOnce, DEFAULT_CONFIG } from "../config.js";
 import { ensureEmbedServer } from "../embeddings.js";
 import { mergeSignalsIntoRowStore, ROWSTORE_LAST_FOLD_MS_KEY, type RowStoreMergeResult } from "../rowstore.js";
+import { fakeApi } from "./helpers/fake-extension-api.js";
+
 
 // ── Hermetic model config (clean-machine fix, 2026-10-15) ──────────────────
 // The real runMergeFold / runLtTableConversion resolve the merge model via
@@ -286,16 +288,12 @@ describe("session_start handler wiring (design §3)", () => {
     vi.mocked(writeLongTerm).mockReset();
     vi.mocked(getPrimaryModel).mockReset();
     vi.mocked(runMergeFold).mockReset();
-    vi.mocked(packMergeChunks).mockReset().mockImplementation((...args: any[]) => realSummarizer.packMergeChunks(...args));
-    vi.mocked(runLtTableConversion).mockReset().mockImplementation((...args: any[]) => realSummarizer.runLtTableConversion(...args));
+    vi.mocked(packMergeChunks).mockReset().mockImplementation((...args) => realSummarizer.packMergeChunks(...args));
+    vi.mocked(runLtTableConversion).mockReset().mockImplementation((...args) => realSummarizer.runLtTableConversion(...args));
     vi.mocked(discoverSessions).mockReset().mockResolvedValue([]);
 
     const captured: Record<string, (...args: any[]) => any> = {};
-    defaultExport({
-      on: (name: string, cb: (...args: any[]) => any) => { captured[name] = cb; },
-      registerTool: () => {},
-      registerCommand: () => {},
-    });
+    defaultExport(fakeApi(captured));
     handlers = captured;
   });
 
@@ -353,7 +351,7 @@ describe("session_start handler wiring (design §3)", () => {
     vi.mocked(readLongTerm).mockResolvedValue({
       timestamp: new Date().toISOString(), summary: validTables("BASE"), charCount: 200, sessionCount: 1, mergedSessions: ["basehash"], // table summary → pre-step takes the 'already-tables' path (no conversion LLM call)
     });
-    vi.mocked(runMergeFold).mockImplementation((...args: any[]) => realSummarizer.runMergeFold(...args));
+    vi.mocked(runMergeFold).mockImplementation((...args) => realSummarizer.runMergeFold(...args));
 
     mockCompleteQueue({ content: [{ type: "text", text: validTables("MERGED-B") }], stopReason: "stop" });
     await fireSessionStart();
@@ -460,16 +458,12 @@ describe("session_start conversion pre-step (pin P6 order)", () => {
     vi.mocked(writeLongTerm).mockReset();
     vi.mocked(getPrimaryModel).mockReset();
     vi.mocked(runMergeFold).mockReset();
-    vi.mocked(packMergeChunks).mockReset().mockImplementation((...args: any[]) => realSummarizer.packMergeChunks(...args));
-    vi.mocked(runLtTableConversion).mockReset().mockImplementation((...args: any[]) => realSummarizer.runLtTableConversion(...args));
+    vi.mocked(packMergeChunks).mockReset().mockImplementation((...args) => realSummarizer.packMergeChunks(...args));
+    vi.mocked(runLtTableConversion).mockReset().mockImplementation((...args) => realSummarizer.runLtTableConversion(...args));
     vi.mocked(discoverSessions).mockReset().mockResolvedValue([]);
 
     const captured: Record<string, (...args: any[]) => any> = {};
-    defaultExport({
-      on: (name: string, cb: (...args: any[]) => any) => { captured[name] = cb; },
-      registerTool: () => {},
-      registerCommand: () => {},
-    });
+    defaultExport(fakeApi(captured));
     handlers = captured;
   });
 
@@ -501,15 +495,15 @@ describe("session_start conversion pre-step (pin P6 order)", () => {
     } as any);
 
     const order: string[] = [];
-    vi.mocked(runLtTableConversion).mockImplementation((...args: any[]) => {
+    vi.mocked(runLtTableConversion).mockImplementation((...args) => {
       order.push("conversion");
       return realSummarizer.runLtTableConversion(...args);
     });
-    vi.mocked(packMergeChunks).mockImplementation((...args: any[]) => {
+    vi.mocked(packMergeChunks).mockImplementation((...args) => {
       order.push("pack");
       return realSummarizer.packMergeChunks(...args);
     });
-    vi.mocked(runMergeFold).mockImplementation((...args: any[]) => realSummarizer.runMergeFold(...args));
+    vi.mocked(runMergeFold).mockImplementation((...args) => realSummarizer.runMergeFold(...args));
 
     mockCompleteQueue({ content: [{ type: "text", text: validTables("CONVERTED-TABLES") }], stopReason: "stop" });
     mockCompleteQueue({ content: [{ type: "text", text: validTables("MERGE-OUT") }], stopReason: "stop" });
@@ -542,7 +536,7 @@ describe("session_start conversion pre-step (pin P6 order)", () => {
       sessionCount: 50,
       mergedSessions: ["h-baseline"],
     } as any);
-    vi.mocked(runMergeFold).mockImplementation((...args: any[]) => realSummarizer.runMergeFold(...args));
+    vi.mocked(runMergeFold).mockImplementation((...args) => realSummarizer.runMergeFold(...args));
 
     mockCompleteQueue({ content: [{ type: "text", text: validTables("MERGE-OUT-B") }], stopReason: "stop" });
 
@@ -566,7 +560,7 @@ describe("session_start conversion pre-step (pin P6 order)", () => {
       sessionCount: 50,
       mergedSessions: ["h-baseline"],
     } as any);
-    vi.mocked(runMergeFold).mockImplementation((...args: any[]) => realSummarizer.runMergeFold(...args));
+    vi.mocked(runMergeFold).mockImplementation((...args) => realSummarizer.runMergeFold(...args));
 
     mockCompleteQueue({ content: [{ type: "text", text: validTables("MERGE-OUT-C") }], stopReason: "stop" });
 
@@ -591,7 +585,7 @@ describe("session_start conversion pre-step (pin P6 order)", () => {
       sessionCount: 50,
       mergedSessions: ["h-baseline"],
     } as any);
-    vi.mocked(runMergeFold).mockImplementation((...args: any[]) => realSummarizer.runMergeFold(...args));
+    vi.mocked(runMergeFold).mockImplementation((...args) => realSummarizer.runMergeFold(...args));
 
     mockCompleteQueue({ content: [{ type: "text", text: "garbage conversion 1" }], stopReason: "stop" });
     mockCompleteQueue({ content: [{ type: "text", text: "garbage conversion 2" }], stopReason: "stop" });
@@ -655,7 +649,7 @@ describe("session_start embedding server probe (design §7)", () => {
   const callOrder: string[] = [];
 
   vi.doMock("../embeddings.js", async (importOriginal) => ({
-    ...(await importOriginal()),
+    ...(await importOriginal<typeof import("../embeddings.js")>()),
     ensureEmbedServer: embedServerSpy,
   }));
 
@@ -688,18 +682,14 @@ describe("session_start embedding server probe (design §7)", () => {
     logSpy = vi.spyOn(loggerFresh, "log").mockImplementation(m => messages.push(m));
     const freshSummarizer = await import("../summarizer.js");
     const freshDiscoverer = await import("../discoverer.js");
-    freshSummarizer.runMergeFold.mockReset();
-    freshSummarizer.packMergeChunks.mockReset().mockImplementation((...args: any[]) => realSummarizer.packMergeChunks(...args));
-    freshSummarizer.runLtTableConversion.mockReset().mockImplementation((...args: any[]) => realSummarizer.runLtTableConversion(...args));
-    freshDiscoverer.discoverSessions.mockReset().mockResolvedValue([]);
+    vi.mocked(freshSummarizer.runMergeFold).mockReset();
+    vi.mocked(freshSummarizer.packMergeChunks).mockReset().mockImplementation((...args) => realSummarizer.packMergeChunks(...args));
+    vi.mocked(freshSummarizer.runLtTableConversion).mockReset().mockImplementation((...args) => realSummarizer.runLtTableConversion(...args));
+    vi.mocked(freshDiscoverer.discoverSessions).mockReset().mockResolvedValue([]);
 
     const mod = await import("../index.js");
     const captured: Record<string, (...args: any[]) => any> = {};
-    mod.default({
-      on: (name: string, cb: (...args: any[]) => any) => { captured[name] = cb; },
-      registerTool: () => {},
-      registerCommand: () => {},
-    });
+    mod.default(fakeApi(captured));
     handlers = captured;
   });
 
@@ -723,13 +713,13 @@ describe("session_start embedding server probe (design §7)", () => {
 
     const freshSummarizer = await import("../summarizer.js");
     const freshDiscoverer = await import("../discoverer.js");
-    freshSummarizer.openCacheDb.mockResolvedValue(db);
-    freshSummarizer.shouldSkipByTime.mockResolvedValue(false);
-    freshDiscoverer.discoverSessions.mockResolvedValue(FAKE_SESSIONS);
-    freshSummarizer.readLongTerm.mockResolvedValue({
+    vi.mocked(freshSummarizer.openCacheDb).mockResolvedValue(db);
+    vi.mocked(freshSummarizer.shouldSkipByTime).mockResolvedValue(false);
+    vi.mocked(freshDiscoverer.discoverSessions).mockResolvedValue(FAKE_SESSIONS);
+    vi.mocked(freshSummarizer.readLongTerm).mockResolvedValue({
       timestamp: new Date().toISOString(), summary: validTables("BASE"), charCount: 200, sessionCount: 1, mergedSessions: ["basehash"], // table summary → pre-step 'already-tables' (no conversion LLM call)
     });
-    freshSummarizer.runMergeFold.mockImplementation(async () => {
+    vi.mocked(freshSummarizer.runMergeFold).mockImplementation(async () => {
       callOrder.push("runMergeFold");
       return { processedChunks: 1, lastSummary: "X", stoppedAtChunk: null, quarantinedPaths: [], busySkipped: false };
     });
@@ -759,7 +749,7 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
 
   const CANNED_ENGINE: RowStoreMergeResult = {
     signalsProcessed: 3, sessionsMarkedMerged: 2, sessionsFailed: [PATH_A],
-    deferredSessions: 4, decisions: [], skipped: [], pruned: 6, sessionCount: 50, llmBusySkipped: false,
+    deferredSessions: 4, decisions: [], skipped: [], signalDetail: [], pruned: 6, sessionCount: 50, llmBusySkipped: false,
   };
 
   beforeEach(async () => {
@@ -789,11 +779,7 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
     vi.mocked(waitForLlmEndpointReady).mockReset().mockResolvedValue(true);
 
     const captured: Record<string, (...args: any[]) => any> = {};
-    defaultExport({
-      on: (name: string, cb: (...args: any[]) => any) => { captured[name] = cb; },
-      registerTool: () => {},
-      registerCommand: () => {},
-    });
+    defaultExport(fakeApi(captured));
     handlers = captured;
   });
 
@@ -838,7 +824,8 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
     // session-start's; the g9 suite (test/rowstore-merge.test.ts:517+) pins the engine-side
     // default-4 behavior — both layers together cover "session-start keeps today's default".
     const engineOpts = vi.mocked(mergeSignalsIntoRowStore).mock.calls[0][2];
-    expect("extractCapOverride" in engineOpts).toBe(false);
+    expect(engineOpts).toBeDefined(); // session-start always passes an options object
+    expect("extractCapOverride" in engineOpts!).toBe(false);
   });
 
   it("(b) useRowStore: true + status unavailable → engine NOT called, nothing marked, skip line logged", async () => {
@@ -969,7 +956,7 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
     vi.mocked(ensureEmbedServer).mockResolvedValue({ status: "ready", source: "probe", port: 5002 });
     vi.mocked(mergeSignalsIntoRowStore).mockResolvedValue({
       signalsProcessed: 0, sessionsMarkedMerged: 0, sessionsFailed: [PATH_A, PATH_B],
-      deferredSessions: 0, decisions: [], skipped: [], pruned: 0, sessionCount: 2, llmBusySkipped: false,
+      deferredSessions: 0, decisions: [], skipped: [], signalDetail: [], pruned: 0, sessionCount: 2, llmBusySkipped: false,
     });
     expect(sqliteGetMeta(db, ROWSTORE_LAST_FOLD_MS_KEY)).toBeNull(); // precondition: absent
 
@@ -987,7 +974,7 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
     vi.mocked(ensureEmbedServer).mockResolvedValue({ status: "ready", source: "probe", port: 5002 });
     vi.mocked(mergeSignalsIntoRowStore).mockResolvedValue({
       signalsProcessed: 0, sessionsMarkedMerged: 0, sessionsFailed: [],
-      deferredSessions: 0, decisions: [], skipped: [], pruned: 0, sessionCount: 2, llmBusySkipped: false,
+      deferredSessions: 0, decisions: [], skipped: [], signalDetail: [], pruned: 0, sessionCount: 2, llmBusySkipped: false,
     });
 
     const before = Date.now();
@@ -1017,5 +1004,145 @@ describe("session_start row-store fold branch (rowstore-merge C3 — T2)", () =>
 
     expect(vi.mocked(waitForLlmEndpointReady)).toHaveBeenCalledWith("http://127.0.0.1:5001/v1");
     expect(order).toEqual(["llm-wait", "engine"]); // the blip window is absorbed before any LLM work starts
+  });
+
+  it('(k) fix 2: the endpoint never answers -> the row-store fold is skipped, the last-fold sentinel stays unstamped', async () => {
+    seedTwoUnmerged(db);
+    vi.mocked(loadConfigOnce).mockReturnValue({ ...DEFAULT_CONFIG, useRowStore: true });
+    vi.mocked(ensureEmbedServer).mockResolvedValue({ status: 'ready', source: 'probe', port: 5002 });
+    vi.mocked(buildMergeModelPair).mockReturnValue({
+      modelObj: { baseUrl: 'http://127.0.0.1:5001/v1' } as any, apiKey: 'sk-none',
+    });
+    vi.mocked(waitForLlmEndpointReady).mockReset().mockResolvedValue(false);
+    vi.mocked(mergeSignalsIntoRowStore).mockReset();
+
+    await fireSessionStart();
+    await flush();
+
+    // The old behaviour folded anyway: every lesson failed and nothing was marked
+    // (live signature: 4 lessons / 0 marked / 4 failed). Fix 2 skips the run.
+    expect(mergeSignalsIntoRowStore, 'no fold against an endpoint that never answered').not.toHaveBeenCalled();
+    expect(sqliteGetMeta(db, ROWSTORE_LAST_FOLD_MS_KEY), 'an unrun fold must not pace the next one').toBeNull();
+    expect(G.__sessionRecallMergeInProgress__).toBe(false); // the flag is cleared in finally
+  });
+});
+
+// ─── /reload lifecycle: loaded-guard reset + session_start reason=reload ─────
+// pi stops the old extension instance (session_shutdown), re-reads the module, then
+// calls the factory again for the new instance. Two things must hold:
+// (1) the shutdown clears the global loaded-guard, so the new instance registers its
+//     tools, commands and handlers instead of returning early; and
+// (2) the session_start that follows a reload carries reason "reload" and must not
+//     start a second merge — every other reason keeps today's merge path.
+
+describe("reload lifecycle (loaded-guard reset, session_start reason=reload)", () => {
+  let db: any;
+  let messages: string[];
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let handlers: Record<string, (...args: any[]) => any>;
+
+  beforeEach(async () => {
+    db = createDb();
+    messages = [];
+    logSpy = vi.spyOn(logger, "log").mockImplementation(m => messages.push(m));
+    mockCompleteReset();
+    G.__sessionRecallLoaded__ = false;
+    G.__sessionRecallMergeInProgress__ = false;
+    G.__sessionRecallLlmBusy__ = false;
+
+    vi.mocked(openCacheDb).mockReset();
+    vi.mocked(shouldSkipByTime).mockReset();
+    vi.mocked(readLongTerm).mockReset().mockResolvedValue(null);
+    vi.mocked(writeLongTerm).mockReset();
+    vi.mocked(getPrimaryModel).mockReset();
+    vi.mocked(runMergeFold).mockReset();
+    vi.mocked(packMergeChunks).mockReset();
+    vi.mocked(runLtTableConversion).mockReset();
+    vi.mocked(discoverSessions).mockReset().mockResolvedValue(FAKE_SESSIONS);
+    vi.mocked(ensureEmbedServer).mockReset();
+    vi.mocked(mergeSignalsIntoRowStore).mockReset();
+    vi.mocked(loadConfigOnce).mockReset().mockReturnValue(DEFAULT_CONFIG);
+    vi.mocked(buildMergeModelPair).mockReset().mockReturnValue(null);
+    vi.mocked(waitForLlmEndpointReady).mockReset().mockResolvedValue(true);
+
+    const captured: Record<string, (...args: any[]) => any> = {};
+    defaultExport(fakeApi(captured));
+    handlers = captured;
+  });
+
+  afterEach(() => {
+    logSpy.mockRestore();
+    db.close();
+  });
+
+  async function flush(): Promise<void> {
+    await new Promise(r => setTimeout(r, 10));
+  }
+
+  it("session_shutdown clears the loaded guard so the next factory call registers tools, commands, and handlers", async () => {
+    expect(G.__sessionRecallLoaded__).toBe(true); // armed by the factory call in beforeEach
+
+    const shutdownCtx: any = {
+      sessionManager: { getSessionFile: () => SESSION_FILE, getBranch: () => [] },
+      cwd: "/test/sr-handler",
+    };
+    const shutdownRun = handlers["session_shutdown"]({ reason: "reload" }, shutdownCtx);
+    // The clear has to be synchronous — pi calls the factory for the new instance
+    // while this event is still being delivered, so it must land before any await.
+    expect(G.__sessionRecallLoaded__).toBe(false);
+    await shutdownRun;
+    expect(G.__sessionRecallLoaded__).toBe(false); // shutdown work does not re-arm it
+
+    // pi re-reads the module and calls the factory for the new instance.
+    const second: Record<string, (...args: any[]) => any> = {};
+    let tools = 0;
+    let commands = 0;
+    defaultExport(fakeApi(second, {
+      tool: () => { tools++; },
+      command: () => { commands++; },
+    }));
+
+    expect(tools).toBeGreaterThan(0);
+    expect(commands).toBeGreaterThan(0);
+    for (const name of ["agent_end", "session_before_compact", "before_agent_start", "session_start", "session_shutdown"]) {
+      expect(typeof second[name]).toBe("function"); // every handler is registered again
+    }
+    expect(G.__sessionRecallLoaded__).toBe(true); // guard re-armed for a further reload
+    expect(messages.join("\n")).not.toContain("Extension already loaded (global guard), skipping");
+  });
+
+  it("session_start reason=reload: merge skipped before the gates, the DB open, and discovery", async () => {
+    // Every gate would pass if the handler got this far.
+    vi.mocked(openCacheDb).mockResolvedValue(db);
+    vi.mocked(shouldSkipByTime).mockResolvedValue(false);
+    // The load-time self-test in the factory also opens the DB once; drop that call
+    // so these assertions describe only what the reload event did.
+    vi.mocked(openCacheDb).mockClear();
+    vi.mocked(discoverSessions).mockClear();
+
+    await handlers["session_start"]({ reason: "reload" }, CTX);
+    await flush();
+
+    expect(messages).toContain("session_start: session=sess-current.jsonl skipping merge (reason=reload)");
+    expect(vi.mocked(openCacheDb)).not.toHaveBeenCalled();
+    expect(vi.mocked(discoverSessions)).not.toHaveBeenCalled();
+    expect(vi.mocked(runMergeFold)).not.toHaveBeenCalled();
+    expect(vi.mocked(mergeSignalsIntoRowStore)).not.toHaveBeenCalled();
+    expect(G.__sessionRecallMergeInProgress__).toBe(false); // never armed for a skipped run
+  });
+
+  it("session_start reason=startup (not reload) keeps today's merge path", async () => {
+    // Empty DB: the merge path stops at the "no unmerged sessions" gate, which is
+    // only reachable when the handler did NOT take the reload skip.
+    vi.mocked(openCacheDb).mockResolvedValue(db);
+    vi.mocked(shouldSkipByTime).mockResolvedValue(false);
+
+    await handlers["session_start"]({ reason: "startup" }, CTX);
+    await flush();
+
+    expect(messages.join("\n")).not.toContain("skipping merge (reason=reload)");
+    expect(vi.mocked(openCacheDb)).toHaveBeenCalled(); // the handler reached gate (2)
+    expect(messages).toContain("session_start: session=sess-current.jsonl no unmerged sessions");
+    expect(G.__sessionRecallMergeInProgress__).toBe(false); // cleared in finally
   });
 });

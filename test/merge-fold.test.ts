@@ -112,11 +112,11 @@ function validTables(label: string): string {
 /** Prose (no table headers) — fails validateTableSummary's header check. */
 const INVALID_SUMMARY = "Prose notes only.\n- some item (score: 2)";
 
-function okText(label: string): unknown {
+function okText(label: string) {
   return { content: [{ type: "text", text: validTables(label) }], stopReason: "stop" };
 }
 
-function invalidText(): unknown {
+function invalidText() {
   return { content: [{ type: "text", text: INVALID_SUMMARY }], stopReason: "stop" };
 }
 
@@ -188,7 +188,7 @@ describe("runMergeFold (design §2.7)", () => {
 
     const order: string[] = [];
     const markPaths: string[][] = [];
-    let midRunLongTerm: { summary: string } | null = null;
+    const midRunLongTerm: Array<{ summary: string } | null> = [];
     const io: MergeFoldIo = {
       write: (d, summary, n, merged) => {
         order.push("write");
@@ -198,7 +198,7 @@ describe("runMergeFold (design §2.7)", () => {
         order.push("mark");
         markPaths.push(paths);
         if (markPaths.length === 1) {
-          midRunLongTerm = sqliteReadLongTerm(d) as { summary: string } | null; // read AFTER write#1
+          midRunLongTerm.push(sqliteReadLongTerm(d) as { summary: string } | null); // read AFTER write#1
         }
         sqliteMarkSessionSummariesMerged(d, paths);
       },
@@ -210,7 +210,8 @@ describe("runMergeFold (design §2.7)", () => {
     expect(markPaths[0]).toEqual([A]);
     expect(markPaths[1]).toEqual([B]);
     // write#1 already stood (long_term bumped with chunk 1's output) before mark#1.
-    expect(midRunLongTerm?.summary).toContain("O1-OUTPUT-ABC");
+    expect(midRunLongTerm).toHaveLength(1); // the capture inside mark#1 really ran
+    expect(midRunLongTerm[0]?.summary).toContain("O1-OUTPUT-ABC");
     const final = sqliteReadLongTerm(db);
     expect(final?.summary).toContain("O2-OUTPUT-DEF");
     // merged_sessions accumulates both chunk hashes, persisted inside the write.
@@ -460,7 +461,7 @@ describe("drift audit — fold counter mechanics", () => {
     const empty = (name: string) => `## ${name}\n| Item | Score | Last-Seen |\n|------|-------|-----------|\n| (none) | | |`;
     return [empty("Key Decisions"), empty("Patterns & Conventions"), empty("Configuration"), empty("Lessons Learned"), empty("Open Issues")].join("\n\n");
   };
-  const okTables = (text: string): unknown => ({ content: [{ type: "text", text }], stopReason: "stop" });
+  const okTables = (text: string) => ({ content: [{ type: "text", text }], stopReason: "stop" });
 
   beforeEach(() => {
     db = createDb();

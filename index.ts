@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 import { loadConfigOnce, CACHE_DIR, type SessionRecallConfig } from "./config.js";
 import { discoverSessions, SQLITE_PATH, matchesIgnorePatterns } from "./discoverer.js";
-import { combineContextForInjection, recentCorrectionsSection, getPrimaryModel, readLongTerm, getLlmStats, shouldSkipByTime, openCacheDb, sqliteReadUnmergedSessionSummaries, mergeSessionSummary, sqliteAppendUnmergedFreshContent, sqliteReadUnmergedContentByPaths, packMergeChunks, runMergeFold, runLtTableConversion, pruneMergeQuarantine, sqliteCountUnmergedSessions, effectiveMergeIntervalMs, sqliteGetMeta, sqliteSetMeta, buildMergeModelPair, waitForLlmEndpointReady, pathBasename } from "./summarizer.js";
+import { combineContextForInjection, recentCorrectionsSection, getPrimaryModel, readLongTerm, getLlmStats, shouldSkipByTime, openCacheDb, sqliteReadUnmergedSessionSummaries, mergeSessionSummary, sqliteAppendUnmergedFreshContent, sqliteReadUnmergedContentByPaths, packMergeChunks, runMergeFold, runLtTableConversion, pruneMergeQuarantine, sqliteCountUnmergedSessions, effectiveMergeIntervalMs, sqliteGetMeta, sqliteSetMeta, buildMergeModelPair, waitForLlmEndpointReady, captureSessionModel, pathBasename } from "./summarizer.js";
 import { ensureEmbedServer } from "./embeddings.js";
 import { mergeSignalsIntoRowStore, getRowsForInjection, getRecentCorrections, ROWSTORE_LAST_FOLD_MS_KEY } from "./rowstore.js";
 import { extractVccSummary } from "./vcc/index.js";
@@ -299,7 +299,16 @@ export async function runRecallFlush(opts: {
     // this box's llama-server wobble history make a fold-start TCP blip fatal —
     // wait (bounded) for the LLM endpoint to answer before the drain loop.
     const flushPair = buildMergeModelPair();
-    if (flushPair) await waitForLlmEndpointReady(flushPair.modelObj.baseUrl);
+    if (flushPair) {
+      const ready = await waitForLlmEndpointReady(flushPair.modelObj.baseUrl);
+      // Fix 2 (2026-10-22): the endpoint never answered — refuse the flush instead
+      // of draining into a run whose every LLM call fails. No strike is recorded
+      // and nothing is marked, so re-running once the server is up works.
+      if (ready === false) {
+        log(`FLUSH REJECTED reason=llm-endpoint-unready endpoint=${flushPair.modelObj.baseUrl}`);
+        return 'recall-flush rejected: the model endpoint is not answering - nothing was folded, re-run once the server is up';
+      }
+    }
     let totalMarked = 0;
     let totalLessons = 0;
     let quarantined = 0;
@@ -363,6 +372,22 @@ export async function runRecallFlush(opts: {
     throw err;
   } finally {
     G.__sessionRecallMergeInProgress__ = false;
+  }
+}
+// One memory block per session file: the record of which session files already got
+// one lives on globalThis so it survives /reload (module scope does not). It is
+// bounded — past MAX_INJECTED_SESSION_RECORDS the oldest inserted session files are
+// dropped, and a dropped session gets a fresh block on its next turn. That is the
+// trade-off for a record that can never grow without limit; 500 short file names
+// cost nothing, so the cap only guards against an unbounded process lifetime.
+const MAX_INJECTED_SESSION_RECORDS = 500;
+
+function rememberInjectedSession(sessionKey: string): void {
+  const record = (G.__sessionRecallContextInjectedSessions__ ??= new Set<string>());
+  record.add(sessionKey);
+  while (record.size > MAX_INJECTED_SESSION_RECORDS) {
+    const oldest = record.values().next().value as string;
+    record.delete(oldest);
   }
 }
 
@@ -514,6 +539,12 @@ export default function (pi: ExtensionAPI) {
     }, 0);
   });
 
+  // model_select (fix 1, 2026-10-22) — the session switched models (set, cycle
+  // or restore). Move the memory fold onto the new model immediately.
+  pi.on("model_select", async (event, ctx) => {
+    await captureSessionModel({ model: event.model ?? ctx.model, modelRegistry: ctx.modelRegistry });
+  });
+
   // session_before_compact — safety net: same as agent_end.
   // Fires when conversation is about to be compacted (truncated for context window).
   // Hash dedup prevents storing the same summary twice.
@@ -528,13 +559,18 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  // R3: before_agent_start — inject context ONCE per session (first turn only).
-  // Dual guard: (1) globalThis flag + session ID (survives module reloads), (2) session entry check.
+  // R3: before_agent_start — inject the memory block once per session (first turn).
+  // The record of which session files already have a block lives on globalThis (it has
+  // to survive /reload) and holds one entry per session file, so two live sessions
+  // each get exactly one block instead of overwriting one shared marker.
   pi.on("before_agent_start", async (_event, ctx) => {
-    // Guard: globalThis flag + session file (prevents re-injection across turns in same session)
-    // Session file changes on new session / Pi restart, so stale entries don't block injection.
+    // Guard: the record of session files that already got a block. The entry for the
+    // current session is never dropped at shutdown, so a reloaded session gets no
+    // second block. A session file that is absent from the record injects on its turn.
     const sessionFile = ctx.sessionManager.getSessionFile();
-    if (G.__sessionRecallContextInjected__ && G.__sessionRecallContextSessionId__ === sessionFile) return;
+    const injectKey = sessionFile ?? "";
+    const alreadyInjected = G.__sessionRecallContextInjectedSessions__;
+    if (alreadyInjected && alreadyInjected.has(injectKey)) return;
 
     try {
 
@@ -555,7 +591,7 @@ export default function (pi: ExtensionAPI) {
         // degrades to [] (no LT section) and is logged — mirrors readLongTerm's
         // never-throw posture (:512-523 catches and degrades); never crashes the
         // session start; never called while useRowStore is false. The openCacheDb
-        // handle is the process-lifetime cached singleton (summarizer.ts :47-60) —
+        // handle is the one shared connection for the process (summarizer.ts, openCacheDb) —
         // NOT closed here, exactly as the default io's readUnmergedContent (house
         // pattern; closeCacheDb is the shutdown path).
         readLtRows: async () => {
@@ -595,8 +631,7 @@ export default function (pi: ExtensionAPI) {
             display: false,
           },
         };
-        G.__sessionRecallContextInjected__ = true;
-        G.__sessionRecallContextSessionId__ = sessionFile;
+        rememberInjectedSession(injectKey);
         return result;
       }
     } catch (err) {
@@ -616,6 +651,20 @@ export default function (pi: ExtensionAPI) {
     log(`session_start fired: session=${sessionName}`);
     // Rotate logs once per session start, not per log write (per-write rotation is too expensive).
     rotateLogs();
+    // Fix 1 (2026-10-22): the merge must run against the model this session is
+    // using. models.json order used to decide, so a session on another provider
+    // folded against a server nobody was running (90 s LLM-WAIT per attempt,
+    // every lesson failed). Refresh the capture from the live context BEFORE
+    // any merge work; a /model switch updates it through model_select.
+    await captureSessionModel(ctx);
+    // A reload re-enters this handler for a session that is already running, so the
+    // merge would only duplicate work the normal gates already pace. Skip it for the
+    // exact reason "reload"; every other reason (startup / new / resume / fork) keeps
+    // today's path untouched.
+    if (_event.reason === "reload") {
+      log(`session_start: session=${sessionName} skipping merge (reason=reload)`);
+      return;
+    }
 
     // R14: Skip merge for subagent sessions.
     // Subagent sessions live at <parent-session>/<hash>/run-N/session.jsonl.
@@ -729,7 +778,17 @@ export default function (pi: ExtensionAPI) {
           // fatal (the Oct 3 / Oct 7 failed folds) — wait up to 90s for the endpoint
           // to answer before any fold work. Steady state = one fast probe, no delay.
           const mergePair = buildMergeModelPair();
-          if (mergePair) await waitForLlmEndpointReady(mergePair.modelObj.baseUrl);
+          if (mergePair) {
+            const ready = await waitForLlmEndpointReady(mergePair.modelObj.baseUrl);
+            // Fix 2 (2026-10-22): false now means NOTHING answered at all. The old
+            // behaviour ran anyway and logged 4 lessons / 0 marked / 4 failed
+            // against a dead address. Skipping leaves the last-fold sentinel
+            // unstamped, so the next session start retries.
+            if (ready === false) {
+              log(`session_start: session=${sessionName} row-store fold SKIPPED reason=llm-endpoint-unready endpoint=${mergePair.modelObj.baseUrl}`);
+              return;
+            }
+          }
           const fold = await mergeSignalsIntoRowStore(db, config, { excludedPaths });
           if (!fold.llmBusySkipped) {
             // Stamp the row-store last-fold sentinel AFTER a real fold run. An llm-busy skip
@@ -771,7 +830,17 @@ export default function (pi: ExtensionAPI) {
         // Bounded LLM readiness wait (2026-10-07) — the legacy (rollback) leg shares the
         // 5001 endpoint and the zero-retry client; same wobble protection as the row-store leg.
         const legacyPair = buildMergeModelPair();
-        if (legacyPair) await waitForLlmEndpointReady(legacyPair.modelObj.baseUrl);
+        if (legacyPair) {
+          const ready = await waitForLlmEndpointReady(legacyPair.modelObj.baseUrl);
+          // Fix 2 (2026-10-22): false now means NOTHING answered at all (an
+          // unreachable address gives up at once, a refused port after the short
+          // window). Folding anyway only produced LLM calls that all failed. No
+          // sentinel is stamped here, so the next session start retries.
+          if (ready === false) {
+            log(`session_start: session=${sessionName} legacy fold SKIPPED reason=llm-endpoint-unready endpoint=${legacyPair.modelObj.baseUrl}`);
+            return;
+          }
+        }
         const fold = await runMergeFold(db, chunks, baseline, longTerm?.mergedSessions ?? [], config);
         log(`session_start: session=${sessionName} fold complete: ${fold.processedChunks}/${chunks.length} chunks, ${fold.quarantinedPaths.length} quarantined, last summary ${fold.lastSummary?.length ?? 0} chars${conversion.converted ? " (post-conversion baseline)" : ""}`);
       } catch (err) {
@@ -788,6 +857,12 @@ export default function (pi: ExtensionAPI) {
     const sessionFile = ctx.sessionManager.getSessionFile();
     const sessionName = sessionFile ? (sessionFile.split(/[\\/]/).pop() || sessionFile) : "unknown";
     log(`session_shutdown fired: session=${sessionName} reason=${_event.reason || 'unknown'}`);
+    // pi re-reads this module and calls the factory again for the new instance
+    // (/reload, or any in-process session replacement). Clearing the loaded guard
+    // here — synchronously, before any await, because pi calls the factory while
+    // this event is still being delivered — is what lets that next factory call
+    // register its tools, commands and handlers instead of returning at the guard.
+    G.__sessionRecallLoaded__ = false;
     try {
       await processLastTurn(ctx, "session_shutdown");
       setLastShutdownResult("session_shutdown processed");
@@ -798,8 +873,9 @@ export default function (pi: ExtensionAPI) {
     // NOTE: Do NOT call closeCacheDb() here. agent_end fires before session_shutdown
     // and schedules its cache append as a macrotask (setTimeout(..., 0)). Closing
     // the DB here would race with the pending agent_end macrotask,
-    // causing silent data loss on every shutdown. The DB is a lazy singleton — it will
-    // be reopened on next session_start, and process exit cleans up the file handle.
+    // causing silent data loss on every shutdown. The connection is shared by the whole
+    // process (it lives on globalThis), so the next extension instance reuses it instead
+    // of opening another one; process exit cleans up the file handle.
   });
 
   // Shared functions for tools and commands

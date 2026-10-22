@@ -8,16 +8,26 @@
 // cost of forgetting: 149/149 signals failed `timeout` in ~0ms on the empty
 // default, no real LLM contact).
 
+import type { Api, Context, Model } from "@earendil-works/pi-ai";
+
 export interface MockCompleteCall {
-  model: unknown;
-  messages: unknown[];
+  model: Model<Api>; // real Model type: live vehicles hand this straight to the real complete()
+  messages: Context["messages"];
   options: Record<string, unknown>; // includes signal, maxTokens, reasoningEffort
   promptText: string; // concatenated text parts of the last user message
   signalAbortedAtCall: boolean; // options.signal.aborted at call time
 }
 
 const calls: MockCompleteCall[] = [];
-type QueuedResponse = unknown | ((call: MockCompleteCall) => unknown | Promise<unknown>);
+// Response queued for one complete() call: either a response object, or a
+// per-call function that receives the recorded call. Declared as a real union
+// on purpose -- the previous `unknown | ((call) => ...)` collapsed to `unknown`
+// (anything unioned with unknown is unknown), so every test callback parameter
+// was implicitly typed and the compiler could not check the call shape.
+export type QueuedResponse =
+  | { [key: string]: unknown }
+  | null
+  | ((call: MockCompleteCall) => unknown | Promise<unknown>);
 const queue: QueuedResponse[] = [];
 const LEGACY_DEFAULT: QueuedResponse = { content: [], stopReason: "stop" };
 let defaultResponse: QueuedResponse = LEGACY_DEFAULT;
@@ -60,8 +70,8 @@ function extractPromptText(messages: unknown[]): string {
 }
 
 export async function complete(
-  model: unknown,
-  { messages }: { messages: unknown[] },
+  model: Model<Api>,
+  { messages }: { messages: Context["messages"] },
   options: Record<string, unknown>,
 ): Promise<unknown> {
   const signal = options?.signal as { aborted?: boolean } | undefined;
@@ -85,22 +95,6 @@ export async function complete(
   return next;
 }
 
-export interface Message {
-  role: string;
-  content: unknown;
-  timestamp?: number;
-}
-
-export interface Model<T = any> {
-  provider: string;
-  id: string;
-  name: string;
-  api: string;
-  baseUrl: string;
-  reasoning?: boolean;
-  input?: ("text" | "image")[];
-  maxTokens?: number;
-  contextWindow?: number;
-  cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
-  compat?: T;
-}
+// No local Model/Message stand-ins: the mock records and forwards the real
+// @earendil-works/pi-ai types, which is what the code under test actually passes
+// and what the live vehicles hand back to the real complete().

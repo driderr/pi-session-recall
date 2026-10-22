@@ -9,6 +9,7 @@
 // process (detached-by-design, §4). The four LTROW-SRV byte forms are constructed
 // ONLY here, via ltrowSrv() (single-emitter rule, §1.4 / P2).
 import { spawn as cpSpawn, type ChildProcess } from "node:child_process";
+import type { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import type { SessionRecallConfig } from "./config.js";
 import { log } from "./logger.js";
@@ -35,7 +36,10 @@ export interface EmbedServerStatus {
 }
 
 export interface EmbedServerIo {
-  spawn?: (exePath: string, args: string[]) => ChildProcess;
+  // The spawner seam asks for exactly what this module touches: pid, unref(), and
+  // the "error" event. The real child_process.ChildProcess satisfies it, and a test
+  // fake does not have to pretend to be a full child process.
+  spawn?: (exePath: string, args: string[]) => Pick<ChildProcess, "pid" | "unref"> & EventEmitter;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
 }

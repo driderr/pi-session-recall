@@ -15,7 +15,7 @@
 // Namespace imports for rowstore/summarizer on purpose: the not-yet-existing
 // exports (`getRowsForInjection`, `renderRowsAsMarkdown`) must fail at CALL time
 // ("not a function" — the pinned RED reason), not at import time.
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type MockInstance } from "vitest";
 import { createRequire } from "node:module";
 import * as logger from "../logger.js";
 import * as rowstore from "../rowstore.js";
@@ -76,7 +76,7 @@ const sentinelBlob = (): string => {
 const SENTINELS = ["SENTINEL-DECISION-ALPHA", "SENTINEL-PATTERN-BETA", "SENTINEL-CONFIG-GAMMA", "SENTINEL-LESSON-DELTA", "SENTINEL-ISSUE-EPSILON"];
 
 let db: any;
-let logSpy: ReturnType<typeof vi.spyOn>;
+let logSpy: MockInstance<typeof logger.log>;
 const logCalls = (): string[] => logSpy.mock.calls.map((c) => String(c[0]));
 
 beforeEach(() => {

@@ -4,7 +4,7 @@
 // aliased anywhere in this repo. Spawn side = mocked via EmbedServerIo.spawn (records argv).
 // The extension never kills: every scenario asserts the fake child's kill was never called.
 // P2 pin: the LTROW-SRV lines below are byte-asserted against the single emitter (embeddings.ts).
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi, type Mock } from "vitest";
 import http from "node:http";
 import { EventEmitter } from "node:events";
 import { AddressInfo } from "node:net";
@@ -24,8 +24,10 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 
 interface FakeChild extends EventEmitter {
   pid: number;
-  kill: ReturnType<typeof vi.fn>;
-  unref: ReturnType<typeof vi.fn>;
+  // Typed vi.fn values: an untyped vi.fn is Mock<Constructable | Procedure>, which
+  // is not callable as () => void, so the fake would not satisfy the spawner seam.
+  kill: Mock<() => boolean>;
+  unref: Mock<() => void>;
 }
 
 let children: FakeChild[] = [];
@@ -34,8 +36,8 @@ let pidCounter = 0;
 function makeFakeChild(): FakeChild {
   const ee = new EventEmitter() as FakeChild;
   ee.pid = 10000 + ++pidCounter;
-  ee.kill = vi.fn(() => true);
-  ee.unref = vi.fn();
+  ee.kill = vi.fn<() => boolean>(() => true);
+  ee.unref = vi.fn<() => void>();
   children.push(ee);
   return ee;
 }

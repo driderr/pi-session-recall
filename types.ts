@@ -1,5 +1,6 @@
 // Global state flags for cross-module communication across Pi module reloads.
 // These survive reloads because they live on globalThis, not module scope.
+import type { Database as BetterSqliteDb } from "better-sqlite3";
 
 export interface LlmStats {
   calls: number;
@@ -15,8 +16,21 @@ export interface SessionRecallGlobals {
   __sessionRecallLlmStats__: LlmStats;
   __sessionRecallLlmBusy__: boolean;
   __sessionRecallVccMerge__: Record<string, boolean>;
-  __sessionRecallContextInjected__: boolean;
-  __sessionRecallContextSessionId__: string | undefined;
+  // One entry per session file that already received its memory block
+  // (before_agent_start). Kept on globalThis so it survives /reload, never cleared at
+  // shutdown; index.ts bounds it at 500 entries, dropping the oldest inserted first.
+  __sessionRecallContextInjectedSessions__: Set<string> | undefined;
+  // The single SQLite connection this process opens for the session index
+  // (summarizer.openCacheDb). It lives here so every module load in one process reuses
+  // it instead of opening another connection to the same database file.
+  __sessionRecallCacheDb__: BetterSqliteDb | undefined;
+  // Failed open attempts for that connection: openCacheDb stops trying after 3 until
+  // closeCacheDb clears it. Shared for the same reason as the connection itself.
+  __sessionRecallCacheDbFailCount__: number | undefined;
+  // The one open attempt in flight, shared so concurrent callers wait for it instead of
+  // each opening a connection of their own (summarizer.openCacheDb). Cleared when the
+  // attempt settles, whether it succeeded or failed.
+  __sessionRecallCacheDbOpening__: Promise<BetterSqliteDb | null> | undefined;
   __sessionRecallMergeInProgress__: boolean;
   // correction-recency-injection D-5/F8: per-session-file evaluated-turn counter
   // for the one-save-per-3-turns capture rate limit (survives module reloads).

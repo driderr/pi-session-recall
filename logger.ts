@@ -3,7 +3,11 @@ import { readdirSync, statSync, unlinkSync, appendFileSync, readFileSync, writeF
 import { gzipSync } from "zlib";
 import { CACHE_DIR } from "./config.js";
 
-const LOG_DIR = join(CACHE_DIR, "..");
+// SESSION_RECALL_LOG_DIR relocates the log. The test harness points it at a scratch
+// directory: a suite that exercises the extension's own startup would otherwise
+// append to the operator's live log (found 2026-10-22 — full-suite runs were writing
+// "Loaded OK" lines there). Production never sets this variable.
+const LOG_DIR = process.env.SESSION_RECALL_LOG_DIR || join(CACHE_DIR, "..");
 let _logDirInitialized = false;
 
 // Log rotation policy

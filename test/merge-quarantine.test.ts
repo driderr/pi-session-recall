@@ -145,7 +145,7 @@ describe("quarantine helpers (design §2.5–2.6)", () => {
 
   it("pruneMergeQuarantine: content change clears the sentinel (reason content-changed)", () => {
     insertUnmerged(db, PATH_A, "content-A-v1");
-    upsertMergeQuarantine(db, PATH_A, { ...activeSentinel(PATH_A, "content-A-v1"), contentHash: md5Content("stale-content") });
+    upsertMergeQuarantine(db, PATH_A, { ...activeSentinel(PATH_A, "content-A-v1", NOW - 86_400_000), contentHash: md5Content("stale-content") });
     // Append to A's content — the MD5 now differs from the recorded one.
     db.prepare("UPDATE session_summaries SET unmerged_fresh_content = unmerged_fresh_content || '-appended' WHERE session_path = ?").run(PATH_A);
 
@@ -277,7 +277,7 @@ function qUnmergedContent(db: any, path: string): string | null {
   return (db.prepare("SELECT unmerged_fresh_content AS c FROM session_summaries WHERE session_path = ?").get(path) as { c: string | null } | undefined)?.c ?? null;
 }
 
-function errorResponse(): unknown {
+function errorResponse() {
   return { content: [], stopReason: "error", errorMessage: "boom" };
 }
 

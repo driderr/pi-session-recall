@@ -1,0 +1,5 @@
+{
+  "//": "Test-tree typecheck gate. Extends the production config; adds the test tree plus the test-only module augmentation. Kept separate from tsconfig.json so production code is always checked against the published @earendil-works/pi-ai, never against the mock.",
+  "extends": "./tsconfig.json",
+  "include": ["test/**/*.ts", "test/**/*.d.ts"]
+}

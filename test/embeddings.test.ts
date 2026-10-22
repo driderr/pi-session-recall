@@ -14,7 +14,7 @@ vi.doMock("node:fs", async () => createFsMock());
 let _testHome = "/test/home";
 
 vi.doMock("node:os", async (importOriginal) => {
-  const actual = await importOriginal();
+  const actual = await importOriginal<typeof import("node:os")>();
   return {
     ...actual,
     homedir: () => _testHome,
@@ -274,7 +274,7 @@ describe("embeddings (rowstore-embeddings design §8.1)", () => {
 
     it("success returns the 3 vectors in input order (one request, array input)", async () => {
       setupEmbedModel();
-      const fetchStub = vi.fn(async () => ({
+      const fetchStub = vi.fn(async (_url: string, _init: FetchCall[1]) => ({
         ok: true, status: 200,
         json: async () => ({ data: [{ embedding: [1, 1] }, { embedding: [2, 2] }, { embedding: [3, 3] }] }),
       }));
@@ -283,7 +283,7 @@ describe("embeddings (rowstore-embeddings design §8.1)", () => {
       const out = await embedBatch(["a", "b", "c"], "document");
       expect(out).toEqual([[1, 1], [2, 2], [3, 3]]);
       expect(fetchStub).toHaveBeenCalledTimes(1);
-      const body = JSON.parse(String((fetchStub.mock.calls[0] as FetchCall)[1].body));
+      const body = JSON.parse(String(fetchStub.mock.calls[0][1].body));
       expect(body.input).toEqual(["search_document: a", "search_document: b", "search_document: c"]);
     });
 

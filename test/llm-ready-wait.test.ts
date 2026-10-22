@@ -14,6 +14,17 @@ import {
   FOLD_LLM_READY_POLL_MS,
 } from "../summarizer.js";
 
+// Test hygiene (2026-10-22): the real logger appends to the LIVE extension log
+// (~/.pi/agent/extensions/session-recall/log-<UTC date>.txt), so this suite's
+// LLM-WAIT lines were landing in the operator's log. Capture instead.
+const logged: string[] = [];
+vi.mock("../logger.js", () => ({
+  getLogPath: () => "/test/log.txt",
+  rotateLogs: () => {},
+  log: (msg: string) => { logged.push(msg); },
+  getRecentLogLines: (count: number) => logged.slice(-count),
+}));
+
 const BASE_URL = "http://127.0.0.1:5001/v1";
 
 type FetchImpl = (url: string, init?: RequestInit) => Promise<Response>;
@@ -61,18 +72,23 @@ describe("waitForLlmEndpointReady (pre-fold bounded wait)", () => {
     expect(sleep).toHaveBeenNthCalledWith(1, FOLD_LLM_READY_POLL_MS);
   });
 
-  it("non-200 (404) is NOT ready — keeps polling until a 200", async () => {
+  // Behaviour changed deliberately by fix 2 (2026-10-22): ANY HTTP answer proves a
+  // server is listening, so a 404 on /models means ready. Such a server used to pay
+  // the whole 90 s window and then fold anyway; false now means "nothing answered",
+  // which is what lets the fold call sites skip safely.
+  it("non-200 (404) IS ready — one probe, no window (fix 2)", async () => {
     const urls: string[] = [];
     let i = 0;
     const fetch: FetchImpl = async (url) => {
       urls.push(url);
       i++;
-      return i === 1 ? ({ ok: false, status: 404 } as Response) : okResponse();
+      return { ok: false, status: 404 } as Response;
     };
     const result = await waitForLlmEndpointReady(BASE_URL, instantIo(fetch));
 
     expect(result).toBe(true);
-    expect(i).toBe(2);
+    expect(i).toBe(1);
+    expect(urls).toEqual([`${BASE_URL}/models`]);
   });
 
   it("always-failing endpoint → false at the deadline; probes at 0, 3s, … 87s (30 probes), no probe past the deadline", async () => {

@@ -69,10 +69,11 @@ describe("mergeSessionSummary", () => {
       "VALUES (?, ?, ?, ?, ?, ?, ?)",
     ).run(sessionPath, 1, existingSummary, existingSummary.length, 1, freshHash, new Date().toISOString());
 
-    // Append logic (same as mergeSessionSummary lines 992-1000)
-    const existingUnmerged = null; // NULL on first call
-    const newValue = existingUnmerged && existingUnmerged.length > 0
-      ? `${existingUnmerged}\n---\n${freshSummary}`
+    // Append logic — mirrors sqliteAppendUnmergedFreshContent (the function
+    // mergeSessionSummary calls). The stored column is NULL on the first call.
+    const stored: { unmerged_fresh_content: string | null } = { unmerged_fresh_content: null };
+    const newValue = stored.unmerged_fresh_content && stored.unmerged_fresh_content.length > 0
+      ? `${stored.unmerged_fresh_content}\n---\n${freshSummary}`
       : freshSummary;
     db.prepare(
       "UPDATE session_summaries SET unmerged_fresh_content = ? WHERE session_path = ?",
