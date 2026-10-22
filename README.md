@@ -40,8 +40,10 @@ RECENT CORRECTIONS (last 7d):
   The extension reads pi's session directory and pi's own model config.
 - **Node 20+** and npm.
 - For the LLM stage (long-term consolidation): pi must have at least one
-  provider/model configured in `~/.pi/agent/models.json`. The extension uses
-  the first entry it finds and ships no model of its own. If none is
+  provider/model configured in `~/.pi/agent/models.json`. The consolidation
+  uses the model your current session is running (it follows a mid-session
+  model switch); when no session model is known it falls back to the first
+  configured entry. The extension ships no model of its own. If none is
   configured, the LLM stages degrade gracefully — the algorithmic summaries
   and injection from already-stored data still work.
 
@@ -177,7 +179,7 @@ budget), `useRowStore` (the Tier 2 switch), `embedServerExePath` /
 
 ## Testing
 
-`npm test` runs the full hermetic unit suite (55 files, ~840 tests) — the
+`npm test` runs the full hermetic unit suite (59 files, 842 tests) — the
 LLM is mocked and there is no network, so it runs green on any machine.
 This is exactly what CI runs.
 

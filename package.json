@@ -1,6 +1,6 @@
 {
   "name": "pi-self-learn",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Self-learning memory for the pi coding agent — distills every session into scored, auto-injected lessons (short- and long-term memory, local RAG), 100% on-device",
   "main": "index.ts",
