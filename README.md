@@ -179,7 +179,7 @@ budget), `useRowStore` (the Tier 2 switch), `embedServerExePath` /
 
 ## Testing
 
-`npm test` runs the full hermetic unit suite (59 files, 842 tests) — the
+`npm test` runs the full hermetic unit suite (60 files, 865 tests) — the
 LLM is mocked and there is no network, so it runs green on any machine.
 This is exactly what CI runs.
 

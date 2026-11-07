@@ -9,7 +9,7 @@ import { readdirSync, existsSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 import { loadConfigOnce, CACHE_DIR, type SessionRecallConfig } from "./config.js";
-import { discoverSessions, SQLITE_PATH, matchesIgnorePatterns } from "./discoverer.js";
+import { discoverSessions, SQLITE_PATH, matchesIgnorePatterns, isSubagentSession } from "./discoverer.js";
 import { combineContextForInjection, recentCorrectionsSection, getPrimaryModel, readLongTerm, getLlmStats, shouldSkipByTime, openCacheDb, sqliteReadUnmergedSessionSummaries, mergeSessionSummary, sqliteAppendUnmergedFreshContent, sqliteReadUnmergedContentByPaths, packMergeChunks, runMergeFold, runLtTableConversion, pruneMergeQuarantine, sqliteCountUnmergedSessions, effectiveMergeIntervalMs, sqliteGetMeta, sqliteSetMeta, buildMergeModelPair, waitForLlmEndpointReady, captureSessionModel, pathBasename } from "./summarizer.js";
 import { ensureEmbedServer } from "./embeddings.js";
 import { mergeSignalsIntoRowStore, getRowsForInjection, getRecentCorrections, ROWSTORE_LAST_FOLD_MS_KEY } from "./rowstore.js";
@@ -140,8 +140,8 @@ export function detectCorrection(text: string): "strong" | "weak" | null {
 // ─── Turn-end correction capture (spec turns-schema R8) ─────────────────────────────
 // correction-recency-injection D-5/D-7: the capture lives in the capture module
 // (index.ts), keyed off the last user message of the MAIN session only — assistant /
-// tool messages never key the detector, and subagent sessions (the run-N/session.jsonl
-// shape the session_start skip already uses) never stamp. Zero LLM / zero embed
+// tool messages never key the detector, and subagent sessions (by the run-N/session.jsonl
+// shape, or by its captured process role) never stamp. Zero LLM / zero embed
 // (D-1): the embed / llmCall seams are accepted for seam symmetry and never invoked.
 //
 // Guard order (an early return means the turn was NOT evaluated — the rate-limit
@@ -152,14 +152,14 @@ export function detectCorrection(text: string): "strong" | "weak" | null {
 //      re-fire never re-evaluates.
 //   2. correctionDetectionEnabled off — the D-7 kill-switch (ON by default; off →
 //      no detector, no marker).
-//   3. subagent session path (both separator shapes) — main-session keying only.
+//   3. subagent session — the caller (processLastTurn) refuses a child-role instance
+//      before this function ever runs; the third guard below is only the session path
+//      shape in either separator form, for a child whose role this process cannot see.
 //
 // Rate limit (D-5/F8): at most one save per 3 turns. A G.__ map keyed by session
 // file (survives module reloads) counts the evaluated turns per file — the 0th and
 // every 3rd evaluated turn allow a save (turns 1, 4, 7, …), and a new session file
 // starts its own count at 0 (reset on a new session file).
-
-const SUBAGENT_SESSION_PATH_RE = /\/run-\d+\/session\.jsonl/;
 
 /** The last user message of the turn, as plain text (string content or text parts). */
 function correctionTurnUserText(lastTurn: any[]): string {
@@ -195,9 +195,10 @@ export async function captureTurnEndCorrection(args: {
   if (args.summaryAppended === false) return { appended: false };
   // Guard 2 — the kill-switch (D-7): off → no detector, no marker, counter untouched.
   if (!config.correctionDetectionEnabled) return { appended: false };
-  // Guard 3 — subagent sessions never stamp (the run-N/session.jsonl path check the
-  // session_start skip already uses; both separator shapes).
-  if (SUBAGENT_SESSION_PATH_RE.test(sessionFile.replace(/\\/g, "/"))) return { appended: false };
+  // Guard 3 — subagent sessions never stamp, by the run-N/session.jsonl path shape
+  // (both separator forms). This is the fallback: the caller also refuses a child by
+  // its captured process role, which is the authoritative fact (see processLastTurn).
+  if (isSubagentSession(sessionFile)) return { appended: false };
 
   // Rate limit (D-5/F8): evaluated turns since the file's count started, per
   // file — every evaluated turn (firing or not) consumes one count; the closure
@@ -380,6 +381,11 @@ export async function runRecallFlush(opts: {
 // dropped, and a dropped session gets a fresh block on its next turn. That is the
 // trade-off for a record that can never grow without limit; 500 short file names
 // cost nothing, so the cap only guards against an unbounded process lifetime.
+// One process-wide budget, shared by every live session in the process — and spent by
+// delegated child sessions too, since the child-role change left the injection leg ungated
+// (R13). Past 500 distinct session files in one long-lived `pi` process the oldest record is
+// evicted and that session gets a second block; the eviction itself is pinned as accepted
+// behaviour in test/before-agent-start-context-per-session.test.ts.
 const MAX_INJECTED_SESSION_RECORDS = 500;
 
 function rememberInjectedSession(sessionKey: string): void {
@@ -392,14 +398,230 @@ function rememberInjectedSession(sessionKey: string): void {
 }
 
 // R4: Global singleton guard — survives module reloads (module-level vars don't)
+//
+// A pi-subagents child is a SECOND session inside the same process, and the
+// ambient extensions are loaded again for it (fork `child-session.ts:561`
+// `noExtensions: !launch.ambientExtensions`; the flag is decided at `child-launch.ts:239` from the
+// agent's tool plan, not from the host), so this factory runs again while the parent's registration
+// is live. Returning at the guard there left the child with no tools, no
+// commands and no handlers, so it recorded nothing at all, while children kept running.
+// (In a real session index, the child-shaped `run-N/session.jsonl` rows that do exist were
+// every one written by a process that loaded this extension ONCE and folded its own `run-N`
+// session as a full parent, which is what a runner did. None came from the blocked second
+// registration.)
+// The guard still has to stop a second registration for the SAME session (pi
+// rebuilds the instance after /reload and any in-process session replacement),
+// so the two cases are told apart by the child marker in the environment.
+// pi-subagents defines that marker for its own child detection (fork
+// `src/runs/shared/child-runtime-config.ts:16`: SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD" — the
+// same marker family path-gate reads as PI_SUBAGENT_PARENT_SESSION at `:24`) and keeps it set only
+// for the child-creation window that contains its loader.reload(), which is exactly when this
+// factory runs.
+//
+// FORK DEPENDENCY, not upstream behaviour: both halves — feeding ambient
+// extensions to an in-process child, and setting that marker around the reload — are what
+// [patch-pkg:pi-subagents:force-feed-ambient] used to add on top of npm 0.80.0, and Pi no longer
+// loads that build. Pi loads the FORK: settings.json's `packages` list names
+// a local checkout's `pi-subagents\dist-pkg` (checked 2026-10-25: a checkout of
+// github.com/nicobailon/pi-subagents, package version 0.82.1, branch `local/subagents-policies`,
+// clean tree). The fork carries both behaviours as its own source: `ambientExtensions` is decided
+// from the agent's tool plan rather than the host (`src/runs/shared/child-launch.ts:239`) and the
+// marker goes into an in-process child's launch env (`child-launch.ts:187`, inside
+// `hostedChildProcessEnv` at `:184-190`). Two consequences for a reader of this file: (1) the npm
+// copy at `~/.pi/agent/npm/node_modules/pi-subagents` (0.80.0, with this machine's patch applied in
+// place — its `src/runs/shared/child-launch.js:200-203` carried the
+// `[patch-pkg:pi-subagents:force-feed-ambient]` comment) and its record
+// `~/.pi/agent/npm/patches/pi-subagents+0.80.0.patch.disabled` were DELETED on 2026-10-26 by
+// operator decision: a dead second copy is exactly where a wrong pi-subagents fact gets checked and
+// then "confirmed". The patch text stays reachable in the `~/.pi/agent/npm/patches` git repo (the
+// record was removed in its commit `539053f`; the older `pi-subagents+0.6x`/`0.7x` records are
+// still there). So an npm-era pi-subagents path quoted in any older note is a path that no longer
+// exists — read the fork. (2) No npm reinstall can silently regress this behaviour; the dependency
+// is the fork checkout, so a change to the fork's child-creation window is the event that needs the
+// tests here re-run. Upstream loads ambient extensions for runner-hosted children only and never
+// marks the parent's process, so without the fork's behaviour this marker is never seen INSIDE A
+// PARENT'S PROCESS: children go back to recording nothing there, silently, and nothing in this
+// repo fails. The marker is still seen in every runner process — the fork's runner marks itself
+// (`src/runs/background/subagent-runner.ts:173-174`, module scope) — so branch 1 keeps answering
+// "child" there and residue (c) below does not depend on the in-process half.
+const SUBAGENT_CHILD_ENV = "PI_SUBAGENT_CHILD";
+// The background runner writes its own pid here. It separates a runner process
+// (children only) from a parent process that happens to carry the child marker.
+const SUBAGENT_RUNNER_PID_ENV = "PI_SUBAGENT_RUNNER_PID";
+
+/**
+ * True when this factory call belongs to a pi-subagents child session.
+ *
+ * Nothing inside pi clears the marker, so it can outlive its purpose in an
+ * environment — a `pi` launched from a background child's shell inherits it. That is
+ * exactly why the marker is not believed on its own outside a runner process (the
+ * two-hosts rule below). Every instance that decides "child" logs one greppable
+ * line at registration, which is how a mislabel is found.
+ * Two hosts, two rules, because the marker's scope differs between them:
+ * - A dedicated runner process marks itself with its own pid and hosts only
+ *   children (fork 0.82.1: `src/runs/background/subagent-runner.ts:173-174`, module scope), so
+ *   there the bare marker is the whole answer. pi-subagents' own extension uses that same bare
+ *   read (fork: `src/extension/index.ts:287`).
+ * - A process that STARTS with the marker — a runner, or a detached child process IF
+ *   pi-subagents ever forwards the marker into one (the marker IS placed in that launch's env,
+ *   fork `child-launch.ts:184-190`, marker at `:187` — but no spawn path in the fork carries it, and
+ *   in this repo — see the note at the capture below) — is a child for its whole life, decided
+ *   by the environment at the FIRST registration this copy of the module performs
+ *   (subagentChildMarkedAtFirstRegistration), so no later registration state can undo it.
+ *   "First registration" means the first one the current module instance sees: pi
+ *   re-imports the module on /reload, so this is not always process
+ *   start — the /reload case is residue (d) below.
+ * - Inside a parent's process the marker lives only for the child-creation window,
+ *   and that window is wide: in the fork `withChildProcessEnvWindow` applies it
+ *   (`child-session.ts:293`) and restores it in `finally` (`:295-297`, via `restoreProcessEnv` at
+ *   `:277`) only after `open()` has run `loader.reload()` (`:597`) and `createAgentSession` (`:634`).
+ *   A parent's own re-registration can land inside it, so the marker is
+ * honoured there only while a parent registration is live. Within one COPY of this module a
+ * parent that is replacing itself has already cleared G.__sessionRecallLoaded__ in
+ * session_shutdown, so it cannot be mislabelled by this branch — the /reload door that can
+ * mislabel it is a fresh module copy, and it is residue (d); a marker that appears later in a
+ *   process that started without one is believed only while a registration is live,
+ *   and that is what keeps the wide window from swallowing a parent.
+ * - That window's snapshot-and-restore is race-free only because pi-subagents SERIALIZES child
+ *   launches: in the fork, `loading` (`src/runs/shared/child-session.ts:256`, doc comment `:255`)
+ *   chains each child's open onto the previous one (`:672-673`). Two overlapping in-process
+ *   launches would break it, and neither failure is the contention R13 exists to prevent: (i) a
+ *   second child's registration can read the marker AFTER the first launch's restore deleted it,
+ *   so it decides "parent" and is then refused by the live global guard — that child records
+ *   nothing again, the pre-change bug, greppable at the guard line (branch 3 is never reached,
+ *   because the environment check returns first); (ii) the second launch takes its snapshot
+ *   BEFORE applying its own env, so it can capture the marker the FIRST launch installed; if the
+ *   first launch's restore runs FIRST, the second launch's `finally` (fork: `restoreProcessEnv`,
+ *   `child-session.ts:277`, called at `:295-297`) writes that captured value back, and every later
+ *   launch then snapshots the leaked marker and
+ *   keeps it alive. Whether the leak sticks depends on the order those two `finally` blocks run —
+ *   the reverse order deletes the marker and leaves no trace. Once it sticks, what is exposed is a
+ *   module copy whose FIRST registration happens inside the leaked environment: that copy is a
+ *   child for its whole life, residue (a)'s shape arriving through (d)'s door. A copy loaded
+ *   before the leak is not spared: its LATER registrations are answered by branch 3,
+ *   `return Boolean(G.__sessionRecallLoaded__)`, and that flag is set only under
+ *   `if (!childInstance)` — so it answers "child" while a PARENT-role registration holds the
+ *   guard, and with the marker leaked that copy meets residue (b)'s mislabel at every later
+ *   registration until it re-registers. What branch 3 does buy it is the nothing-live case: then
+ *   it answers "parent". Nothing in this repo enforces the launch ordering; it is an outside
+ *   invariant this file depends on.
+ *
+ * Accepted residue, in five parts. (a) A `pi` whose OWN startup environment already
+ * carried a stale marker — launched from a child's shell — is labelled a child for its
+ * whole life: no guard ownership, no fold, no correction markers, until it is started
+ * from a clean environment. `master` has the same exposure, and it is the cheaper
+ * mistake: a mislabelled child leaves a line in the log, while a child that folds
+ * quietly feeds delegated transcripts into long-term memory. (b) Inside a parent's
+ * process, a factory call for a session that is NOT a child — the case is a second independent
+ * session in that process (a `/reload` is not this branch's door; it belongs to (d)) — landing
+ * inside the child-creation window WHILE a parent registration is live is labelled a child until
+ * that session restarts. Its
+ * mirror case (a marker with no live registration) resolves to a parent instead, and
+ * test/child-session-registration.test.ts pins that. That mirror is only safe when the
+ * marked session really is a parent: a genuine child that registers while nothing is live
+ * takes the guard, and the guard is what then refuses the real parent's own registration
+ * until that session restarts. While that child's file still matches the `run-N` shape, the
+ * path rule keeps it out of the fold, out of the correction marker and out of `/recall`, so
+ * the damage there is a stolen guard and not polluted long-term memory. That last clause is
+ * conditional, and deliberately so: this file treats the path rule as insufficient elsewhere
+ * (the role is authoritative precisely because pi-subagents can hand a child a session file
+ * outside `run-N`), and for exactly such a child the mirror case hands over the fold, the
+ * correction marker and `/recall-flush` as well as the guard. Before this branch (b) registered
+ * nothing at all, so (b) is the narrower failure. (c) In a runner or detached-child
+ * process every instance is a child, so nothing there ever owns the guard and a
+ * duplicate registration for one session is never refused there; /recall-health's
+ * shutdown slot consequently stays "Not yet run" in such a process. (a) and (c) show up
+ * as the "child instance detected" line at registration with no delegated run behind
+ * it. (d) The capture belongs to a COPY of this module and pi re-imports it on /reload, so a
+ * /reload landing inside the child-creation window captures the marker as true and that copy's
+ * instances are children: no guard ownership, no fold, no correction markers. It is NOT for
+ * life — the live environment is consulted BEFORE the capture, so once pi-subagents closes the
+ * window and restores the environment that copy answers "parent" again — but only at its NEXT
+ * registration. `childInstance` is decided once per registration and every suppression gate
+ * closes over that constant, so the session that is already registered keeps its child role for
+ * its own life, until it re-registers (`/new`, another /reload outside a window, or a restart):
+ * the same shape as (b)'s "until that session restarts". Reordering those
+ * two guards (answering from the capture first) passes every other test in the suite, which is
+ * why test/child-session-registration.test.ts pins the order by name. Only when the marker never
+ * leaves the environment do (d) and (a) become the same case; either way the load line names the
+ * role out loud.
+ * (e) One process, two live registrations, and a few pieces of state that were never
+ * per-session: the drift counters the long-term-injection diagnostic line prints are one
+ * process-global accumulator (summarizer's accumulateDriftEvents / takeDriftEvents pair), so a
+ * child's injection can drain the counts its parent's fold-side audit accumulated and print
+ * them under the child's own name. The producer is the fold, which only a parent-role instance
+ * ever runs, so the leak runs one way. Bounded and diagnostic-only: it feeds one log line, on
+ * the `useRowStore: false` rollback leg only (the row-store injection path never reads the
+ * accumulator), and /recall-health shows it merely as text inside its recent-log tail — there
+ * is no health field for it. Fixing it properly means keying the accumulator the way the
+ * injection-dedup map already is, which is a change to the diagnostic's own contract, not to
+ * the child rule.
+ *
+ * Citations in this file name the pi-subagents build pi actually loads on the maintainer's
+ * machine: a local FORK of github.com/nicobailon/pi-subagents (0.82.1) named in
+ * `~/.pi/agent/settings.json`'s `packages` list — so those citations carry that checkout's own
+ * line numbers and may not match the npm release you install. An older npm copy some of them
+ * first came from (0.80.0, patched in place, loaded by nothing) was deleted on 2026-10-26 —
+ * checking a claim there would have "confirmed" it about a build that never ran. When in doubt
+ * about which build is loaded, read your own `~/.pi/agent/settings.json` `packages` entry first.
+ */
+// Whether this process was already marked as a pi-subagents child (or as the runner
+// that hosts them) when it began running extensions. Captured at the FIRST registration
+// rather than at import because the environment that matters is the one a process ran
+// extensions in, and a process that inherits a marker from a subagent's shell must not be
+// labelled by it before it registers. The inherited-marker defence that actually protects
+// the suite now lives in test/setup.ts, which deletes the variable before any test module
+// is imported and again before every test — the reason this capture used to give (an
+// import-time read made 27 unrelated tests decide "child" under `PI_SUBAGENT_CHILD=1 npm
+// test`) is no longer reachable through it, so this capture is belt-and-braces on top of
+// that clear. Every real child still qualifies on the evidence in hand: a runner marks itself
+// before loading extensions (fork `subagent-runner.ts:173-174`, module scope), and the launch env
+// pi-subagents builds for an in-process child carries the marker (fork `child-launch.ts:184-190`,
+// `PI_SUBAGENT_CHILD: "1"` at `:187`). What is NOT traced in this repo is the spawn
+// path that forwards that env into a detached child's own environment, so branch 1's
+// detached-child case rests on that route existing; the runner case does not.
+let subagentChildMarkedAtFirstRegistration: boolean | undefined;
+
+function isSubagentChildInstance(): boolean {
+  if (subagentChildMarkedAtFirstRegistration === undefined) {
+    subagentChildMarkedAtFirstRegistration = process.env[SUBAGENT_CHILD_ENV] === "1";
+  }
+  if (process.env[SUBAGENT_CHILD_ENV] !== "1") return false;
+  // This process was marked before it started running extensions (a child, or a runner
+  // hosting children): the label holds for its whole life, whatever registrations have
+  // come and gone inside it.
+  if (subagentChildMarkedAtFirstRegistration) return true;
+  // A runner process marks itself with its own pid and hosts only children — covers a
+  // runner that marked itself only after this module had already registered once.
+  if (process.env[SUBAGENT_RUNNER_PID_ENV] === String(process.pid)) return true;
+  // A marker that appeared later (inside a parent's process) is not enough on its own
+  // — its window is wide (see above). A parent replacing itself already cleared the
+  // flag in session_shutdown.
+  return Boolean(G.__sessionRecallLoaded__);
+}
+
+// How every log line in this file names a session (R14): its own file name, or "unknown"
+// when the hook handed us no session file. Six older sites still spell this out inline;
+// new code calls this instead of adding a seventh copy.
+function sessionLogName(sessionFile: string | undefined): string {
+  return sessionFile ? sessionFile.split(/[\\/]/).pop() || sessionFile : "unknown";
+}
 
 export default function (pi: ExtensionAPI) {
-  if (G.__sessionRecallLoaded__) {
+  const childInstance = isSubagentChildInstance();
+  // One greppable line per child instance: it registers tools, commands and
+  // handlers but owns no long-term memory work. Also the only visible trace of the
+  // mislabelled-process case documented on isSubagentChildInstance.
+  if (childInstance) log(`child instance detected (${SUBAGENT_CHILD_ENV}=1): registering without long-term memory ownership`);
+  if (!childInstance && G.__sessionRecallLoaded__) {
     log("Extension already loaded (global guard), skipping");
     return;
   }
-  G.__sessionRecallLoaded__ = true;
-  log("Extension loaded");
+  // A child must not take ownership of the flag: setting it would block the next
+  // parent instance, and clearing it at child shutdown would release the
+  // parent's registration (see session_shutdown).
+  if (!childInstance) G.__sessionRecallLoaded__ = true;
+  log(childInstance ? "Extension loaded (subagent child instance)" : "Extension loaded");
   // Self-test on load
   (async () => {
     const checks: Array<{ name: string; ok: boolean; detail?: string }> = [];
@@ -500,7 +722,12 @@ export default function (pi: ExtensionAPI) {
       // D-5/D-7: the turn-end correction capture — only when this turn's summary
       // append actually happened. Zero LLM / zero embed (D-1): regex + a DB append
       // at most.
-      if (summaryAppended && captureDb) {
+      // A child session never stamps a correction marker. Its role, captured when
+      // this instance registered, is the authoritative fact; the path-shape guard
+      // inside captureTurnEndCorrection is only the fallback, because pi-subagents
+      // can hand a child a session file outside run-N. A stamped marker becomes a
+      // permanent corrected_at row and is injected into every later session.
+      if (summaryAppended && captureDb && !childInstance) {
         const corr = await captureTurnEndCorrection({
           db: captureDb,
           sessionFile,
@@ -532,7 +759,7 @@ export default function (pi: ExtensionAPI) {
     setTimeout(async () => {
       try {
         await processLastTurn(ctx, "agent_end");
-        setLastShutdownResult("agent_end processed");
+        if (!childInstance) setLastShutdownResult("agent_end processed");
       } catch (err) {
         log(`agent_end ERROR: ${err}`);
       }
@@ -542,6 +769,16 @@ export default function (pi: ExtensionAPI) {
   // model_select (fix 1, 2026-10-22) — the session switched models (set, cycle
   // or restore). Move the memory fold onto the new model immediately.
   pi.on("model_select", async (event, ctx) => {
+    // R13: the capture is one module-level slot the fold reads. A child instance
+    // must not repoint the parent's merge at the child's model — same reason
+    // session_start returns before capturing it (see the comment there).
+    if (childInstance) {
+      // Optional chaining because this branch is a pure no-op: nothing it does may be
+      // able to throw and lose the caller's model switch. The name is for the log line only.
+      const selFile = ctx.sessionManager?.getSessionFile?.();
+      log(`model_select: session=${sessionLogName(selFile)} subagent session, leaving the fold-model capture alone`);
+      return;
+    }
     await captureSessionModel({ model: event.model ?? ctx.model, modelRegistry: ctx.modelRegistry });
   });
 
@@ -642,20 +879,44 @@ export default function (pi: ExtensionAPI) {
   // session_start: kick off async LLM merge for next session's long-term context.
   // Discovers unmerged sessions, packs them into chunks, and runs the chunked merge fold,
   // and writes the updated long-term summary for the NEXT session to use.
-  //
-  // Subagent sessions (path contains /run-*/session.jsonl) skip the merge entirely.
-  // Only the parent session is responsible for long-term memory consolidation.
   pi.on("session_start", async (_event, ctx) => {
     const sessionFile = ctx.sessionManager.getSessionFile();
     const sessionName = sessionFile ? (sessionFile.split(/[\\/]/).pop() || sessionFile) : "unknown";
     log(`session_start fired: session=${sessionName}`);
     // Rotate logs once per session start, not per log write (per-write rotation is too expensive).
     rotateLogs();
+
+    // R13: Skip merge for subagent sessions, recognised two ways; both are needed.
+    // The session-file shape (discoverer's isSubagentSession — child storage normally
+    // puts the child at <parent-session>/<id>/run-N/session.jsonl) and the
+    // process role captured when this instance registered: pi-subagents can also
+    // hand a child a file outside run-N, which the shape test alone would let
+    // through to the shared fold. The role comes from the registration-time capture
+    // because its environment marker does not outlive the child-creation window.
+    // Consequence, accepted: a background-runner process holds only children and
+    // nothing there refreshes the capture any more, so /recall-health in such a
+    // process prints models.json's primary model instead of the session's own.
+    // Diagnostic output only — the fold itself never runs in that process.
+    // Same reason covers a parent-role session whose file happens to match the
+    // run-N shape: it returns here too, so it no longer refreshes the capture the
+    // way it did before this branch. Harmless — such a session never reaches the
+    // fold either way.
+    if (childInstance || (sessionFile && isSubagentSession(sessionFile))) {
+      log(`session_start: session=${sessionName} subagent session, skipping merge`);
+      return;
+    }
+
     // Fix 1 (2026-10-22): the merge must run against the model this session is
     // using. models.json order used to decide, so a session on another provider
     // folded against a server nobody was running (90 s LLM-WAIT per attempt,
-    // every lesson failed). Refresh the capture from the live context BEFORE
-    // any merge work; a /model switch updates it through model_select.
+    // every lesson failed). Refresh the capture from the live context BEFORE any
+    // merge work; a /model switch updates it through model_select. The child return
+    // above comes first on purpose: the capture writes module-level state, and a
+    // child instance that reached it would replace the parent's captured model
+    // whenever pi-subagents keeps one module copy for the child (its per-child
+    // extension-cache reset can fail and continue anyway). The reload return comes
+    // AFTER the capture deliberately — a reload skips the merge but must still
+    // refresh the capture, which test/session-model-wiring.test.ts pins.
     await captureSessionModel(ctx);
     // A reload re-enters this handler for a session that is already running, so the
     // merge would only duplicate work the normal gates already pace. Skip it for the
@@ -663,14 +924,6 @@ export default function (pi: ExtensionAPI) {
     // today's path untouched.
     if (_event.reason === "reload") {
       log(`session_start: session=${sessionName} skipping merge (reason=reload)`);
-      return;
-    }
-
-    // R14: Skip merge for subagent sessions.
-    // Subagent sessions live at <parent-session>/<hash>/run-N/session.jsonl.
-    // Only the parent session should trigger long-term memory consolidation.
-    if (sessionFile && /\/run-\d+\/session\.jsonl/.test(sessionFile.replace(/\\/g, "/"))) {
-      log(`session_start: session=${sessionName} subagent session, skipping merge`);
       return;
     }
 
@@ -862,13 +1115,23 @@ export default function (pi: ExtensionAPI) {
     // here — synchronously, before any await, because pi calls the factory while
     // this event is still being delivered — is what lets that next factory call
     // register its tools, commands and handlers instead of returning at the guard.
-    G.__sessionRecallLoaded__ = false;
+    // A child instance never owns the flag (see the guard), so it must not clear
+    // it either: a child shutting down while the parent is still live would let a
+    // duplicate parent instance register twice for one session.
+    // The decision uses the value captured when THIS instance registered, not a
+    // fresh environment read: pi-subagents restores PI_SUBAGENT_CHILD when the
+    // child-creation window closes (fork: `withChildProcessEnvWindow`, child-session.ts:290-297), so
+    // a re-read here would report "parent" for a shutting-down child and release
+    // the parent's flag.
+    if (!childInstance) G.__sessionRecallLoaded__ = false;
     try {
       await processLastTurn(ctx, "session_shutdown");
-      setLastShutdownResult("session_shutdown processed");
+      // The shutdown-result slot feeds /recall-health, which reports the parent
+      // session; a child must not overwrite what the operator reads there.
+      if (!childInstance) setLastShutdownResult("session_shutdown processed");
     } catch (err) {
       log(`session_shutdown ERROR: session=${sessionName} ${err}`);
-      setLastShutdownResult(`Error: ${err}`);
+      if (!childInstance) setLastShutdownResult(`Error: ${err}`);
     }
     // NOTE: Do NOT call closeCacheDb() here. agent_end fires before session_shutdown
     // and schedules its cache append as a macrotask (setTimeout(..., 0)). Closing
@@ -1172,6 +1435,15 @@ export default function (pi: ExtensionAPI) {
     description:
       "Drain ALL pending unmerged sessions into the row store now (in batches of 5, bypassing the time throttle)",
     handler: async (_args, ctx) => {
+      // R13: a child instance must never drain the backlog, whatever dispatches it.
+      // runRecallFlush takes the single fold slot and writes the row store; only the
+      // parent session owns long-term memory work.
+      if (childInstance) {
+        const flushFile = ctx.sessionManager?.getSessionFile?.();
+        log(`/recall-flush: session=${sessionLogName(flushFile)} subagent session, refusing to drain the backlog`);
+        ctx.ui?.notify?.("Not available in a subagent session.", "warning");
+        return;
+      }
       try {
         const output = await runRecallFlush({});
         ctx.ui.notify(output.trim());

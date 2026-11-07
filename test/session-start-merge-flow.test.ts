@@ -82,10 +82,16 @@ vi.mock("../config.js", async (importOriginal) => {
   return { ...actual, loadConfigOnce: vi.fn(() => actual.DEFAULT_CONFIG) };
 });
 
-vi.mock("../discoverer.js", () => ({
-  discoverSessions: vi.fn(),
-  SQLITE_PATH: "/test/sr-handler/session-index.sqlite",
-}));
+vi.mock("../discoverer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../discoverer.js")>();
+  // The real isSubagentSession must stay reachable: index.ts calls it in the R13 fold
+  // gate and in the correction guard, both under test in this file.
+  return {
+    ...actual,
+    discoverSessions: vi.fn(),
+    SQLITE_PATH: "/test/sr-handler/session-index.sqlite",
+  };
+});
 
 vi.mock("../summarizer.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../summarizer.js")>();
@@ -653,7 +659,7 @@ describe("session_start embedding server probe (design §7)", () => {
     ensureEmbedServer: embedServerSpy,
   }));
 
-  // Subagent shape: <parent>/<hash>/run-N/session.jsonl (index.ts R14 pattern).
+  // Subagent shape: <parent>/<hash>/run-N/session.jsonl (index.ts R13 pattern).
   const CTX_SUBAGENT: any = {
     sessionManager: { getSessionFile: () => "/pi/agent/sessions/sess-current/ab12cd34/run-3/session.jsonl" },
     cwd: "/test/sr-handler",
@@ -702,7 +708,7 @@ describe("session_start embedding server probe (design §7)", () => {
     await handlers["session_start"]({}, CTX_SUBAGENT);
     await new Promise(r => setTimeout(r, 10));
 
-    expect(messages.join("\n")).toContain("subagent session, skipping merge"); // handler ran to the R14 return
+    expect(messages.join("\n")).toContain("subagent session, skipping merge"); // handler ran to the R13 return
     expect(embedServerSpy).not.toHaveBeenCalled();
     expect(callOrder).toEqual([]);
   });

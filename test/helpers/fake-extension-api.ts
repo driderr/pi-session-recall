@@ -30,7 +30,12 @@ export function fakeApi(
       return () => {};
     },
     registerTool: () => { counters?.tool?.(); },
-    registerCommand: () => { counters?.command?.(); },
+    // Command handlers are captured under a "command:" key so a test can dispatch
+    // one; the prefix keeps them from colliding with event-handler names.
+    registerCommand: (name: string, def: { handler: (...args: any[]) => any }) => {
+      captured[`command:${name}`] = def.handler;
+      counters?.command?.();
+    },
   };
   return new Proxy(impl, {
     get: (target, prop) =>

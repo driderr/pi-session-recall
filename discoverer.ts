@@ -3,6 +3,7 @@ import { join, normalize, dirname } from "node:path";
 import { homedir } from "node:os";
 import type { SessionRecallConfig } from "./config.js";
 import { openCacheDb } from "./summarizer.js";
+import { log } from "./logger.js";
 import type { Database as BetterSqliteDb } from "better-sqlite3";
 
 export interface DiscoveredSession {
@@ -15,9 +16,14 @@ export interface DiscoveredSession {
 const SESSIONS_DIR = join(homedir(), ".pi", "agent", "sessions");
 export const SQLITE_PATH = join(SESSIONS_DIR, "session-index.sqlite");
 
-// R14: Detect subagent sessions. Subagent sessions live at
-// <parent-session>/<hash>/run-N/session.jsonl. Skip them during discovery;
-// the parent session already captures the relevant context.
+// R13: Recognise a child session by its storage shape:
+// <parent-session-dir>/<child-run-id>/run-N/session.jsonl — what the pi-subagents build Pi
+// actually loads (the pi-subagents fork, 0.82.1) really writes — and it is the only child
+// shape a real session index contains. Discovery skips those paths, so a delegated run is
+// not listed to the user. This sees the path only;
+// the child's
+// process role — which is what also keeps it out of long-term memory work — is
+// captured in index.ts when the extension instance registers.
 export function isSubagentSession(path: string): boolean {
   return /\/run-\d+\/session\.jsonl/.test(path.replace(/\\/g, "/"));
 }
@@ -70,39 +76,94 @@ async function querySqlite(config: SessionRecallConfig, cwd?: string, ignorePatt
       params.push(`${cwd}%`);
     }
 
-    query += " ORDER BY updated_at DESC LIMIT ?";
-    params.push(String(config.maxSessions * 2));
-
-    const rows = db.prepare(query).all(...params) as Array<{ session_path: string; updated_at: string }>;
+    // The child and missing-file filters below run AFTER a row window is taken, so one
+    // fixed window lets the rows it discards crowd real sessions out of the budget: a
+    // delegated run leaves one `run-N/session.jsonl` row per child behind, and those are
+    // the newest rows by `updated_at`. Measured on a real session index at the default
+    // maxSessions: filling the budget took two pages of rows, while the single fixed window
+    // this replaces returned only half the sessions it was asked for. Scan forward
+    // in fixed pages until the budget is filled or the table runs out, capped at ten windows.
+    // The returned count still never exceeds `wanted`, which is what the single LIMIT used to
+    // guarantee, and the same cap bounds the extra work: at most `wanted * 10` rows fetched
+    // and stat'd per call. That ceiling scales with config, not with the table — at the
+    // maxSessions clamp of 50 it is 1000 rows — and the synchronous worst case is cheap: 1000
+    // statSync calls measured a few milliseconds, which is why no absolute row limit was
+    // added on top of the cap. Each page re-sorts the table (nothing is indexed on
+    // updated_at), so the ten-page worst case is ten sorts of it as well.
+    const wanted = config.maxSessions * 2;
+    const maxScanRows = wanted * 10;
+    // The tie-breaker matters for paging: with equal `updated_at` values SQLite makes no
+    // ordering promise across statements, so a row can land in two pages or in none.
+    const stmt = db.prepare(
+      `${query} ORDER BY updated_at DESC, session_path DESC LIMIT ? OFFSET ?`,
+    );
     const results: DiscoveredSession[] = [];
     const seen = new Set<string>();
+    let offset = 0;
+    let rowsScanned = 0; // rows actually fetched, which is what the SHORT line reports
+    let scanStoppedBecause = "";
+    let scanStoppedEarly = false;
 
-    for (const row of rows) {
-      const path = row.session_path;
-      // Dedup: same session_path can appear multiple times
-      if (seen.has(path)) continue;
+    while (results.length < wanted && !scanStoppedEarly) {
+      const rows = stmt.all(...params, wanted, offset) as Array<{
+        session_path: string;
+        updated_at: string;
+      }>;
+      rowsScanned += rows.length;
+      if (rows.length < wanted) scanStoppedEarly = true; // the table is exhausted
+      offset += wanted;
+      // Exhaustion wins the reason. When the last page is partial AND the window position
+      // reaches the cap in the same pass, the true statement is "there were no more rows",
+      // not "I gave up" — a SHORT line there would tell an operator to raise a cap that was
+      // never the limit. The cap therefore reports only while the table still had more to give.
+      if (offset >= maxScanRows && !scanStoppedEarly) {
+        // The cap, not the table, ended the scan: the list can come back short and nothing
+        // else would say why. One greppable line for "my /recall went short during a heavy
+        // delegated run".
+        scanStoppedBecause = `scan cap of ${maxScanRows} rows reached`;
+        scanStoppedEarly = true;
+      }
 
-      try {
-        if (isSubagentSession(path)) continue;
-        const stat = statSync(path);
-        if (stat.isFile()) {
-          // Derive timestamp from filename (e.g. 2026-06-13T09-30-54-900Z_...)
-          const timestamp = extractTimestampFromPath(path);
-          // Derive cwd from parent directory
-          const sessionDir = dirname(path);
-          const cwd = decodeCwdFromPath(path, sessionDir);
+      for (const row of rows) {
+        const path = row.session_path;
+        // Dedup: same session_path can appear multiple times
+        if (seen.has(path)) continue;
 
-          seen.add(path);
-          results.push({ path, cwd, timestamp, sizeBytes: stat.size });
-        }
-      } catch { /* File missing */ }
+        try {
+          if (isSubagentSession(path)) continue;
+          const stat = statSync(path);
+          if (stat.isFile()) {
+            // Derive timestamp from filename (e.g. 2026-06-13T09-30-54-900Z_...)
+            const timestamp = extractTimestampFromPath(path);
+            // Derive cwd from parent directory
+            const sessionDir = dirname(path);
+            const decodedCwd = decodeCwdFromPath(path, sessionDir);
+
+            seen.add(path);
+            results.push({ path, cwd: decodedCwd, timestamp, sizeBytes: stat.size });
+            if (results.length >= wanted) break;
+          }
+        } catch { /* File missing */ }
+      }
     }
 
     // Filter out ignored sessions
-    if (ignorePatterns.length > 0) {
-      return results.filter(s => !matchesIgnorePatterns(s.path, ignorePatterns));
+    const kept =
+      ignorePatterns.length > 0
+        ? results.filter((s) => !matchesIgnorePatterns(s.path, ignorePatterns))
+        : results;
+
+    // The short-list test reads `kept`, not `results`: ignorePatterns is user config, so a scan
+    // can fill its budget with rows the caller then filters away and still hand back a short
+    // list. Calling that "not short" is the one thing this line exists to prevent.
+    if (scanStoppedBecause && kept.length < wanted) {
+      // Reports the rows actually FETCHED. Because exhaustion wins the reason above, the last
+      // page is always full when this prints and the two numbers agree; counting the fetch
+      // keeps the reported figure honest if that rule ever changes.
+      log(`DISCOVERY SHORT scanned=${rowsScanned} wanted=${wanted} reason=${scanStoppedBecause}`);
     }
-    return results;
+
+    return kept;
   } catch (err) {
     console.warn(`[session-recall] SQLite discovery failed: ${err}`);
     return [];

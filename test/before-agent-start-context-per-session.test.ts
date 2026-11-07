@@ -21,11 +21,17 @@ vi.mock("../config.js", async (importOriginal) => {
   return { ...actual, loadConfigOnce: vi.fn(() => actual.DEFAULT_CONFIG) };
 });
 
-vi.mock("../discoverer.js", () => ({
-  discoverSessions: vi.fn(),
-  matchesIgnorePatterns: vi.fn(() => false),
-  SQLITE_PATH: "/test/sr-inject/session-index.sqlite",
-}));
+vi.mock("../discoverer.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../discoverer.js")>();
+  // The real isSubagentSession stays reachable: index.ts calls it in the R13 fold gate
+  // and the correction guard, so a stub that omits it breaks those paths.
+  return {
+    ...actual,
+    discoverSessions: vi.fn(),
+    matchesIgnorePatterns: vi.fn(() => false),
+    SQLITE_PATH: "/test/sr-inject/session-index.sqlite",
+  };
+});
 
 vi.mock("../summarizer.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../summarizer.js")>();
@@ -108,6 +114,32 @@ describe("before_agent_start: one memory block per session file", () => {
     // B taking its block must not cost A its record: neither session repeats.
     expect(await handlers["before_agent_start"]({}, ctxFor(SESSION_A))).toBeUndefined();
     expect(await handlers["before_agent_start"]({}, ctxFor(SESSION_B))).toBeUndefined();
+    expect(vi.mocked(combineContextForInjection)).toHaveBeenCalledTimes(2);
+  });
+  it("a child-role registration gets the same block: the injection leg is not role-gated", async () => {
+    // R13 records this as a decision — a delegated child keeps the memory block and pays the
+    // same per-session scan; only the long-term-memory WRITERS are role-gated. Before the
+    // child-role change an in-process child registered no handlers at all, so this leg is new
+    // behaviour and had no test: putting `if (childInstance) return;` at the top of
+    // before_agent_start kept the whole suite green. The file is deliberately a real child's
+    // `run-N` shape: the leg checks neither the role nor the path, and this says so.
+    const parent = handlers;
+    process.env["PI_SUBAGENT_CHILD"] = "1";
+    const childCaptured: Record<string, (...args: any[]) => any> = {};
+    defaultExport(fakeApi(childCaptured)); // a parent registration is live → child role
+    const child = childCaptured;
+    delete process.env["PI_SUBAGENT_CHILD"];
+
+    const got = await child["before_agent_start"](
+      {},
+      ctxFor("/pi/agent/sessions/hash-0/run-0/session.jsonl"),
+    );
+    expect(got?.message?.customType).toBe("session-recall-context");
+    expect(got?.message?.content).toBe(BRIEF);
+
+    // And the child's block must not cost the parent its record.
+    const parentTurn = await parent["before_agent_start"]({}, ctxFor(SESSION_A));
+    expect(parentTurn?.message?.customType).toBe("session-recall-context");
     expect(vi.mocked(combineContextForInjection)).toHaveBeenCalledTimes(2);
   });
 

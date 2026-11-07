@@ -14,7 +14,22 @@ import { G } from "../types.js"; // Typed globalThis accessor
 try { mkdirSync(join(tmpdir(), "session-recall-test-logs"), { recursive: true }); } catch { /* ignore */ }
 process.env.SESSION_RECALL_LOG_DIR = join(tmpdir(), "session-recall-test-logs");
 
+// Test hygiene (2026-10-25): a vitest worker launched from inside a pi-subagents run
+// inherits PI_SUBAGENT_CHILD (and usually PI_SUBAGENT_RUNNER_PID) process-wide. The
+// extension reads those to decide whether the instance registering is a subagent child,
+// and a child owns no long-term-memory work — so without this, `PI_SUBAGENT_CHILD=1 npm
+// test` made 27 tests decide "child" and fail, and other tests pass for the wrong
+// reason. Cleared here, before any test module is imported, so the role a process
+// decides at its first registration never depends on who started vitest. A test that
+// WANTS a child role sets the variable in its own body.
+delete process.env.PI_SUBAGENT_CHILD;
+delete process.env.PI_SUBAGENT_RUNNER_PID;
+
 beforeEach(() => {
+  // Same reason as the module-scope clear above, enforced per test: one file leaking the
+  // marker must not decide the role of the next file's registrations.
+  delete process.env.PI_SUBAGENT_CHILD;
+  delete process.env.PI_SUBAGENT_RUNNER_PID;
   // Reset LLM busy flag
   G.__sessionRecallLlmBusy__ = false;
   // Reset LLM stats
